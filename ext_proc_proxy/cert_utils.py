@@ -1,0 +1,116 @@
+"""SSL certificate utilities for loading and generating certificates."""
+
+import os
+import ssl
+import subprocess
+import tempfile
+from typing import Optional, Tuple
+
+
+def generate_self_signed_cert(
+    cert_path: Optional[str] = None,
+    key_path: Optional[str] = None,
+    hostname: str = "localhost",
+    days: int = 365,
+) -> Tuple[str, str]:
+    """Generate a self-signed certificate and private key using openssl CLI.
+
+    If cert_path and key_path are not provided, files will be created in a
+    temporary directory and will persist for the process lifetime.
+
+    Args:
+        cert_path: Optional path where the certificate PEM will be saved.
+        key_path: Optional path where the private key PEM will be saved.
+        hostname: Common Name / SAN hostname (default: localhost).
+        days: Certificate validity period in days.
+
+    Returns:
+        Tuple of (cert_path, key_path).
+    """
+    if not cert_path or not key_path:
+        temp_dir = tempfile.mkdtemp(prefix="proxy_tls_")
+        cert_path = cert_path or os.path.join(temp_dir, "cert.pem")
+        key_path = key_path or os.path.join(temp_dir, "key.pem")
+
+    # Generate openssl config with Subject Alternative Names (SAN)
+    san_entries = [
+        f"DNS:{hostname}",
+        "DNS:localhost",
+        "IP:127.0.0.1",
+        "IP:::1",
+    ]
+    # Filter unique SAN entries
+    san_string = ",".join(sorted(set(san_entries)))
+
+    cmd = [
+        "openssl",
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-keyout",
+        key_path,
+        "-out",
+        cert_path,
+        "-days",
+        str(days),
+        "-subj",
+        f"/CN={hostname}",
+        "-addext",
+        f"subjectAltName={san_string}",
+    ]
+
+    try:
+        subprocess.run(
+            cmd,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except subprocess.CalledProcessError as err:
+        raise RuntimeError(
+            f"Failed to generate self-signed certificate: {err.stderr}"
+        ) from err
+
+    return cert_path, key_path
+
+
+def create_server_ssl_context(
+    cert_file: Optional[str] = None,
+    key_file: Optional[str] = None,
+    generate_self_signed: bool = False,
+    hostname: str = "localhost",
+) -> ssl.SSLContext:
+    """Create and configure a server SSLContext.
+
+    Args:
+        cert_file: Path to certificate PEM file.
+        key_file: Path to private key PEM file.
+        generate_self_signed: If True, generate self-signed certificate.
+        hostname: Hostname for self-signed certificate SAN.
+
+    Returns:
+        Configured ssl.SSLContext for TLS server.
+    """
+    if generate_self_signed:
+        cert_file, key_file = generate_self_signed_cert(
+            cert_path=cert_file, key_path=key_file, hostname=hostname
+        )
+    elif not cert_file or not key_file:
+        raise ValueError(
+            "Either provide both cert_file and key_file, or set generate_self_signed=True"
+        )
+
+    if not os.path.exists(cert_file):
+        raise FileNotFoundError(f"Certificate file not found: {cert_file}")
+    if not os.path.exists(key_file):
+        raise FileNotFoundError(f"Private key file not found: {key_file}")
+
+    ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    # Ensure modern TLS versions
+    ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
+    ssl_context.load_cert_chain(certfile=cert_file, keyfile=key_file)
+    return ssl_context
+
