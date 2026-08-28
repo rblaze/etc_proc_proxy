@@ -32,8 +32,7 @@ HOP_BY_HOP_HEADERS: Set[str] = {
 
 # Headers that must not be propagated per proxy requirements
 EXCLUDED_REQUEST_HEADERS: Set[str] = {
-    "x-forwarded-for",
-    "x-forwarded-host",
+    "x-forwarded-proto",
 }
 
 
@@ -178,7 +177,7 @@ async def client_session_cleanup_ctx(app: web.Application):
 
     connector = aiohttp.TCPConnector(ssl=upstream_ssl_ctx)
     timeout = ClientTimeout(total=config.upstream_timeout)
-    session = aiohttp.ClientSession(connector=connector, timeout=timeout)
+    session = aiohttp.ClientSession(connector=connector, timeout=timeout, auto_decompress=False)
     app[CLIENT_SESSION_KEY] = session
 
     yield
