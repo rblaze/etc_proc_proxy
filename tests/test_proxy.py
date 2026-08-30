@@ -121,6 +121,7 @@ class TestProxyIntegration(unittest.IsolatedAsyncioTestCase):
                     "query": dict(request.query),
                     "received_body": body,
                     "custom_header": request.headers.get("X-Test-Header"),
+                    "x_forwarded_proto": request.headers.get("X-Forwarded-Proto"),
                 }
             )
 
@@ -148,6 +149,7 @@ class TestProxyIntegration(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(data["query"], {"foo": "bar"})
                 self.assertEqual(data["received_body"], "sample payload")
                 self.assertEqual(data["custom_header"], "HelloProxy")
+                self.assertIsNone(data["x_forwarded_proto"])
 
     async def test_x_forwarded_proto_https_with_tls_verify(self):
         """Test proxying to HTTPS upstream with TLS verification when X-Forwarded-Proto is https."""
@@ -243,6 +245,7 @@ class TestProxyIntegration(unittest.IsolatedAsyncioTestCase):
                 # Verify excluded headers were not sent upstream
                 self.assertNotIn("X-Forwarded-For", received_upstream_headers)
                 self.assertNotIn("X-Forwarded-Host", received_upstream_headers)
+                self.assertNotIn("X-Forwarded-Proto", received_upstream_headers)
                 self.assertNotIn("X-Custom-Hop", received_upstream_headers)
                 self.assertEqual(
                     received_upstream_headers.get("X-Valid-Header"), "KeepThis"

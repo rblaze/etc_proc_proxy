@@ -3,12 +3,14 @@
 import argparse
 from dataclasses import dataclass
 from typing import List, Optional
+from urllib.parse import urlparse
 
 
 @dataclass
 class ProxyConfig:
-    """Proxy server configuration."""
+    """Proxy and ext_proc server configuration."""
 
+    # HTTPS Proxy settings
     host: str = "0.0.0.0"
     port: int = 8443
     cert: Optional[str] = None
@@ -18,24 +20,30 @@ class ProxyConfig:
     upstream_timeout: float = 60.0
     log_level: str = "INFO"
 
+    # Envoy ext_proc server settings
+    ext_proc_host: str = "0.0.0.0"
+    ext_proc_port: int = 50051
+    ext_proc_target: str = "http://127.0.0.1:8080"
+
 
 def parse_args(args: Optional[List[str]] = None) -> ProxyConfig:
     """Parse command line arguments into ProxyConfig."""
     parser = argparse.ArgumentParser(
-        description="HTTPS-terminating HTTP/HTTPS proxy using aiohttp",
+        description="HTTPS-terminating HTTP/HTTPS proxy and Envoy ext_proc server",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+    # HTTPS Proxy options
     parser.add_argument(
         "--host",
         default="0.0.0.0",
-        help="Host/IP address to bind the proxy server to",
+        help="Host/IP address to bind the HTTPS proxy server to",
     )
     parser.add_argument(
         "-p",
         "--port",
         type=int,
         default=8443,
-        help="Port to listen for incoming HTTPS connections",
+        help="Port to listen for incoming HTTPS proxy connections",
     )
     parser.add_argument(
         "--cert",
@@ -69,10 +77,36 @@ def parse_args(args: Optional[List[str]] = None) -> ProxyConfig:
         help="Logging level",
     )
 
+    # Envoy ext_proc options
+    parser.add_argument(
+        "--ext-proc-host",
+        default="0.0.0.0",
+        help="Host/IP address to bind the Envoy ext_proc gRPC server to",
+    )
+    parser.add_argument(
+        "--ext-proc-port",
+        type=int,
+        default=50051,
+        help="Port to listen for Envoy ext_proc gRPC connections",
+    )
+    parser.add_argument(
+        "--ext-proc-target",
+        default="http://127.0.0.1:8080",
+        help="Target URL for the ext_proc HTTP server (e.g. http://127.0.0.1:8080)",
+    )
+
     parsed = parser.parse_args(args)
 
     if not parsed.self_signed and (not parsed.cert or not parsed.key):
         parser.error("Either specify --self-signed or provide both --cert and --key.")
+
+    # Validate ext_proc_target URL
+    parsed_url = urlparse(parsed.ext_proc_target)
+    if parsed_url.scheme not in ("http", "https") or not parsed_url.netloc:
+        parser.error(
+            f"Invalid --ext-proc-target '{parsed.ext_proc_target}'. "
+            "Must be a valid HTTP or HTTPS URL, e.g. http://127.0.0.1:8080"
+        )
 
     return ProxyConfig(
         host=parsed.host,
@@ -83,5 +117,7 @@ def parse_args(args: Optional[List[str]] = None) -> ProxyConfig:
         keepalive_timeout=parsed.keepalive_timeout,
         upstream_timeout=parsed.upstream_timeout,
         log_level=parsed.log_level,
+        ext_proc_host=parsed.ext_proc_host,
+        ext_proc_port=parsed.ext_proc_port,
+        ext_proc_target=parsed.ext_proc_target,
     )
-

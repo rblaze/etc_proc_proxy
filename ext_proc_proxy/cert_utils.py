@@ -6,6 +6,8 @@ import subprocess
 import tempfile
 from typing import Optional, Tuple
 
+import grpc
+
 
 def generate_self_signed_cert(
     cert_path: Optional[str] = None,
@@ -73,17 +75,21 @@ def generate_self_signed_cert(
         raise RuntimeError(
             f"Failed to generate self-signed certificate: {err.stderr}"
         ) from err
+    except FileNotFoundError as err:
+        raise RuntimeError(
+            "OpenSSL executable ('openssl') was not found in PATH."
+        ) from err
 
     return cert_path, key_path
 
 
-def create_server_ssl_context(
+def get_or_create_server_cert_and_key(
     cert_file: Optional[str] = None,
     key_file: Optional[str] = None,
     generate_self_signed: bool = False,
     hostname: str = "localhost",
-) -> ssl.SSLContext:
-    """Create and configure a server SSLContext.
+) -> Tuple[str, str]:
+    """Resolve or generate certificate and private key file paths.
 
     Args:
         cert_file: Path to certificate PEM file.
@@ -92,10 +98,10 @@ def create_server_ssl_context(
         hostname: Hostname for self-signed certificate SAN.
 
     Returns:
-        Configured ssl.SSLContext for TLS server.
+        Tuple of (cert_file, key_file).
     """
     if generate_self_signed:
-        cert_file, key_file = generate_self_signed_cert(
+        return generate_self_signed_cert(
             cert_path=cert_file, key_path=key_file, hostname=hostname
         )
     elif not cert_file or not key_file:
@@ -108,9 +114,55 @@ def create_server_ssl_context(
     if not os.path.exists(key_file):
         raise FileNotFoundError(f"Private key file not found: {key_file}")
 
+    return cert_file, key_file
+
+
+def create_server_ssl_context(
+    cert_file: str,
+    key_file: str,
+) -> ssl.SSLContext:
+    """Create and configure a server SSLContext from certificate and private key files.
+
+    Args:
+        cert_file: Path to certificate PEM file.
+        key_file: Path to private key PEM file.
+
+    Returns:
+        Configured ssl.SSLContext for TLS server.
+    """
+    if not os.path.exists(cert_file):
+        raise FileNotFoundError(f"Certificate file not found: {cert_file}")
+    if not os.path.exists(key_file):
+        raise FileNotFoundError(f"Private key file not found: {key_file}")
+
     ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     # Ensure modern TLS versions
     ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
     ssl_context.load_cert_chain(certfile=cert_file, keyfile=key_file)
     return ssl_context
 
+
+def create_grpc_server_credentials(
+    cert_file: str,
+    key_file: str,
+) -> grpc.ServerCredentials:
+    """Create gRPC server SSL credentials from certificate and private key files.
+
+    Args:
+        cert_file: Path to certificate PEM file.
+        key_file: Path to private key PEM file.
+
+    Returns:
+        Configured grpc.ServerCredentials for TLS server.
+    """
+    if not os.path.exists(cert_file):
+        raise FileNotFoundError(f"Certificate file not found: {cert_file}")
+    if not os.path.exists(key_file):
+        raise FileNotFoundError(f"Private key file not found: {key_file}")
+
+    with open(key_file, "rb") as f:
+        private_key = f.read()
+    with open(cert_file, "rb") as f:
+        certificate_chain = f.read()
+
+    return grpc.ssl_server_credentials(((private_key, certificate_chain),))

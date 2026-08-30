@@ -3,67 +3,25 @@
 import asyncio
 import logging
 import ssl
-from typing import AsyncIterator, Optional, Set
+from typing import AsyncIterator, Optional
 
 import aiohttp
-from aiohttp import ClientTimeout, web
-import multidict
+from aiohttp import web
 
-from ext_proc_proxy.cert_utils import create_server_ssl_context
 from ext_proc_proxy.config import ProxyConfig
+from ext_proc_proxy.http_utils import (
+    classify_upstream_error,
+    create_client_session,
+    filter_request_headers,
+    filter_response_headers,
+    is_bodyless_response,
+)
 
-logger = logging.getLogger("ext_proc_proxy")
+logger = logging.getLogger("http_proxy")
 
 CONFIG_KEY = web.AppKey("config", ProxyConfig)
 UPSTREAM_SSL_KEY = web.AppKey("upstream_ssl_context", ssl.SSLContext)
 CLIENT_SESSION_KEY = web.AppKey("client_session", aiohttp.ClientSession)
-
-# Standard Hop-by-Hop headers defined in RFC 2616 / RFC 7230 / RFC 9110
-HOP_BY_HOP_HEADERS: Set[str] = {
-    "connection",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "te",
-    "trailers",
-    "transfer-encoding",
-    "upgrade",
-}
-
-# Headers that must not be propagated per proxy requirements
-EXCLUDED_REQUEST_HEADERS: Set[str] = {
-    "x-forwarded-proto",
-}
-
-
-def filter_request_headers(headers: multidict.CIMultiDictProxy) -> multidict.CIMultiDict:
-    """Filter hop-by-hop and excluded headers from incoming request headers."""
-    filtered = multidict.CIMultiDict()
-    connection_val = headers.get("connection", "")
-    connection_tokens = {
-        token.strip().lower() for token in connection_val.split(",") if token.strip()
-    }
-    strip_set = HOP_BY_HOP_HEADERS | connection_tokens | EXCLUDED_REQUEST_HEADERS
-
-    for key, value in headers.items():
-        if key.lower() not in strip_set:
-            filtered.add(key, value)
-    return filtered
-
-
-def filter_response_headers(headers: multidict.CIMultiDictProxy) -> multidict.CIMultiDict:
-    """Filter hop-by-hop headers from upstream response headers."""
-    filtered = multidict.CIMultiDict()
-    connection_val = headers.get("connection", "")
-    connection_tokens = {
-        token.strip().lower() for token in connection_val.split(",") if token.strip()
-    }
-    strip_set = HOP_BY_HOP_HEADERS | connection_tokens
-
-    for key, value in headers.items():
-        if key.lower() not in strip_set:
-            filtered.add(key, value)
-    return filtered
 
 
 async def stream_request_payload(request: web.Request) -> AsyncIterator[bytes]:
@@ -120,29 +78,12 @@ async def handle_proxy_request(request: web.Request) -> web.StreamResponse:
             allow_redirects=False,
         )
         upstream_resp = await upstream_cm.__aenter__()
-    except (ssl.SSLCertVerificationError, aiohttp.ClientSSLError) as err:
-        logger.warning("TLS certificate verification failed for %s: %s", target_url, err)
+    except Exception as err:
+        status_code, err_msg = classify_upstream_error(err)
+        logger.warning("Upstream request error for %s: %s", target_url, err)
         return web.Response(
-            status=502,
-            text=f"502 Bad Gateway: Upstream TLS certificate verification failed ({err})",
-        )
-    except aiohttp.ClientConnectorError as err:
-        logger.warning("Connection failed to %s: %s", target_url, err)
-        return web.Response(
-            status=502,
-            text=f"502 Bad Gateway: Failed to connect to upstream ({err})",
-        )
-    except asyncio.TimeoutError:
-        logger.warning("Request timed out to %s", target_url)
-        return web.Response(
-            status=504,
-            text="504 Gateway Timeout: Upstream server timed out",
-        )
-    except aiohttp.ClientError as err:
-        logger.warning("Upstream client error for %s: %s", target_url, err)
-        return web.Response(
-            status=502,
-            text=f"502 Bad Gateway: Upstream client error ({err})",
+            status=status_code,
+            text=err_msg,
         )
 
     # 6. Stream response back to original client connection
@@ -157,7 +98,7 @@ async def handle_proxy_request(request: web.Request) -> web.StreamResponse:
         await response.prepare(request)
 
         # Do not attempt to read body for HEAD requests or body-less status codes
-        if request.method != "HEAD" and upstream_resp.status not in (204, 304):
+        if not is_bodyless_response(request.method, upstream_resp.status):
             async for chunk in upstream_resp.content.iter_any():
                 await response.write(chunk)
 
@@ -171,13 +112,7 @@ async def client_session_cleanup_ctx(app: web.Application):
     """Context manager for managing aiohttp.ClientSession lifecycle."""
     config: ProxyConfig = app[CONFIG_KEY]
     upstream_ssl_ctx = app.get(UPSTREAM_SSL_KEY)
-    if upstream_ssl_ctx is None:
-        # Default SSL context verifies target server TLS certificate
-        upstream_ssl_ctx = ssl.create_default_context()
-
-    connector = aiohttp.TCPConnector(ssl=upstream_ssl_ctx)
-    timeout = ClientTimeout(total=config.upstream_timeout)
-    session = aiohttp.ClientSession(connector=connector, timeout=timeout, auto_decompress=False)
+    session = create_client_session(config=config, upstream_ssl_context=upstream_ssl_ctx)
     app[CLIENT_SESSION_KEY] = session
 
     yield
@@ -206,21 +141,11 @@ def create_proxy_app(
     return app
 
 
-async def run_proxy(config: ProxyConfig) -> None:
-    """Initialize and run the proxy server."""
-    logging.basicConfig(
-        level=getattr(logging, config.log_level.upper(), logging.INFO),
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
-
-    logger.info("Initializing server SSL context...")
-    ssl_context = create_server_ssl_context(
-        cert_file=config.cert,
-        key_file=config.key,
-        generate_self_signed=config.self_signed,
-        hostname=config.host if config.host not in ("0.0.0.0", "::") else "localhost",
-    )
-
+async def run_proxy(
+    config: ProxyConfig,
+    ssl_context: ssl.SSLContext,
+) -> None:
+    """Initialize and run the HTTPS proxy server."""
     app = create_proxy_app(config)
     runner = web.AppRunner(app, keepalive_timeout=config.keepalive_timeout)
     await runner.setup()
@@ -233,7 +158,7 @@ async def run_proxy(config: ProxyConfig) -> None:
     )
     await site.start()
     logger.info(
-        "Proxy server listening on https://%s:%d (keepalive: %.1fs)",
+        "HTTPS proxy server listening on https://%s:%d (keepalive: %.1fs)",
         config.host,
         config.port,
         config.keepalive_timeout,
@@ -242,7 +167,5 @@ async def run_proxy(config: ProxyConfig) -> None:
     try:
         while True:
             await asyncio.sleep(3600)
-    except (asyncio.CancelledError, KeyboardInterrupt):
-        logger.info("Shutting down proxy server...")
     finally:
         await runner.cleanup()
