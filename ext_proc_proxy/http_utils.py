@@ -22,11 +22,15 @@ HOP_BY_HOP_HEADERS: Set[str] = {
     "upgrade",
 }
 
+# Header used to correlate ext_proc sessions with HTTP proxy requests
+REQUEST_ID_HEADER: str = "x-ai-proxy-request-id"
+
 # Headers that must not be propagated per proxy requirements
 EXCLUDED_REQUEST_HEADERS: Set[str] = {
     "x-forwarded-for",
     "x-forwarded-host",
     "x-forwarded-proto",
+    REQUEST_ID_HEADER,
 }
 
 

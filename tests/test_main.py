@@ -37,15 +37,17 @@ class TestMain(unittest.IsolatedAsyncioTestCase):
         proxy_called = False
         grpc_called = False
 
-        async def mock_run_proxy(config, ssl_context):
+        async def mock_run_proxy(config, ssl_context, **kwargs):
             nonlocal proxy_called
             proxy_called = True
             self.assertIsNotNone(ssl_context)
+            self.assertIn("session_registry", kwargs)
 
-        async def mock_run_grpc_server(config, server_credentials):
+        async def mock_run_grpc_server(config, server_credentials, **kwargs):
             nonlocal grpc_called
             grpc_called = True
             self.assertIsInstance(server_credentials, grpc.ServerCredentials)
+            self.assertIn("session_registry", kwargs)
 
         with patch("ext_proc_proxy.__main__.run_proxy", side_effect=mock_run_proxy), \
              patch("ext_proc_proxy.__main__.run_grpc_server", side_effect=mock_run_grpc_server):

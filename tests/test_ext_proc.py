@@ -213,26 +213,11 @@ class TestExtProcServer(unittest.IsolatedAsyncioTestCase):
             req_headers.request_headers.end_of_stream = False
             await input_queue.put(req_headers)
 
-            # Receive headers response acknowledging CONTINUE
-            resp1 = await call.read()
-            self.assertTrue(resp1.HasField("request_headers"))
-            self.assertEqual(
-                resp1.request_headers.response.status,
-                external_processor_pb2.CommonResponse.ResponseStatus.CONTINUE,
-            )
-
-            # 2. Send chunk 1
+            # 2. Send chunk 1 (no intermediate confirmations needed in FULL_DUPLEX_STREAMED mode)
             chunk1 = external_processor_pb2.ProcessingRequest()
             chunk1.request_body.body = b"first chunk of data; "
             chunk1.request_body.end_of_stream = False
             await input_queue.put(chunk1)
-
-            resp_chunk1 = await call.read()
-            self.assertTrue(resp_chunk1.HasField("request_body"))
-            self.assertEqual(
-                resp_chunk1.request_body.response.status,
-                external_processor_pb2.CommonResponse.ResponseStatus.CONTINUE,
-            )
 
             # 3. Send chunk 2 (final chunk)
             chunk2 = external_processor_pb2.ProcessingRequest()

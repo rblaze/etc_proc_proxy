@@ -12,6 +12,7 @@ from ext_proc_proxy.cert_utils import (
 from ext_proc_proxy.config import ProxyConfig, parse_args
 from ext_proc_proxy.ext_proc_server import run_grpc_server
 from ext_proc_proxy.proxy import run_proxy
+from ext_proc_proxy.session_registry import SessionRegistry
 
 logger = logging.getLogger("ext_proc_proxy.main")
 
@@ -40,18 +41,22 @@ async def run_servers(config: ProxyConfig) -> None:
         key_file=key_file,
     )
 
+    session_registry = SessionRegistry()
+
     try:
         async with asyncio.TaskGroup() as tg:
             tg.create_task(
                 run_proxy(
                     config=config,
                     ssl_context=ssl_context,
+                    session_registry=session_registry,
                 )
             )
             tg.create_task(
                 run_grpc_server(
                     config=config,
                     server_credentials=server_credentials,
+                    session_registry=session_registry,
                 )
             )
     except* (asyncio.CancelledError, KeyboardInterrupt):

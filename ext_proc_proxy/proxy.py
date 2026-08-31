@@ -7,21 +7,33 @@ from typing import AsyncIterator, Optional
 
 import aiohttp
 from aiohttp import web
+import multidict
 
 from ext_proc_proxy.config import ProxyConfig
 from ext_proc_proxy.http_utils import (
+    REQUEST_ID_HEADER,
     classify_upstream_error,
     create_client_session,
     filter_request_headers,
     filter_response_headers,
     is_bodyless_response,
 )
+from ext_proc_proxy.session_registry import (
+    EnvoyResponseBodyChunk,
+    EnvoyResponseHeaders,
+    ExtProcSession,
+    SessionAbort,
+    SessionRegistry,
+    UpstreamRequestBodyChunk,
+    UpstreamRequestHeaders,
+)
 
-logger = logging.getLogger("http_proxy")
+logger = logging.getLogger("ext_proc_proxy.http")
 
 CONFIG_KEY = web.AppKey("config", ProxyConfig)
 UPSTREAM_SSL_KEY = web.AppKey("upstream_ssl_context", ssl.SSLContext)
 CLIENT_SESSION_KEY = web.AppKey("client_session", aiohttp.ClientSession)
+SESSION_REGISTRY_KEY = web.AppKey("session_registry", SessionRegistry)
 
 
 async def stream_request_payload(request: web.Request) -> AsyncIterator[bytes]:
@@ -30,8 +42,127 @@ async def stream_request_payload(request: web.Request) -> AsyncIterator[bytes]:
         yield chunk
 
 
+async def handle_paired_proxy_request(
+    request: web.Request,
+    session: ExtProcSession,
+) -> web.StreamResponse:
+    """Handle request paired with an ext_proc session via X-Ai-Proxy-Request-Id."""
+    session.is_paired = True
+    outgoing_headers = filter_request_headers(request.headers)
+    req_headers_list = list(outgoing_headers.items())
+    prepared = False
+
+    try:
+        # 1. Feed request headers to the paired gRPC session queue
+        await session.request_to_envoy_queue.put(
+            UpstreamRequestHeaders(
+                method=request.method,
+                path=str(request.rel_url),
+                headers=req_headers_list,
+                has_body=request.can_read_body,
+            )
+        )
+
+        # 2. Stream request body chunks if present
+        if request.can_read_body:
+            content_iter = request.content.iter_any()
+            try:
+                prev_chunk = await anext(content_iter)
+            except StopAsyncIteration:
+                await session.request_to_envoy_queue.put(
+                    UpstreamRequestBodyChunk(data=b"", is_last=True)
+                )
+            else:
+                async for next_chunk in content_iter:
+                    await session.request_to_envoy_queue.put(
+                        UpstreamRequestBodyChunk(data=prev_chunk, is_last=False)
+                    )
+                    prev_chunk = next_chunk
+                await session.request_to_envoy_queue.put(
+                    UpstreamRequestBodyChunk(data=prev_chunk, is_last=True)
+                )
+
+        # TODO: it seems that this code will not react to the SessionAbort
+        # from Envoy until the full request is read from the HTTP connection
+        # and enqueued for sending. It will not process any response messages
+        # either, for example if the final target server returns an error
+        # without waiting for the full request body.
+        # It's arguably okay for MVP, but may need to be addressed later. My
+        # concern is that requests can be quite big if they include a lot of
+        # context and keeping them in memory in case of SessionAbort will cause
+        # unnecessary waste until the full request is read.
+
+        # 3. Read response from Envoy via the paired session response queue
+        first_item = await session.response_from_envoy_queue.get()
+        if isinstance(first_item, SessionAbort):
+            return web.Response(
+                status=502,
+                text=f"502 Bad Gateway: {first_item.reason}",
+            )
+        if not isinstance(first_item, EnvoyResponseHeaders):
+            return web.Response(
+                status=502,
+                text="502 Bad Gateway: Unexpected response from ext_proc session",
+            )
+
+        resp_headers = multidict.CIMultiDict(first_item.headers)
+        response = web.StreamResponse(
+            status=first_item.status,
+            headers=resp_headers,
+        )
+        await response.prepare(request)
+        prepared = True
+
+        # 4. Stream response body chunks if not a body-less response
+        if not first_item.is_empty_body:
+            while True:
+                item = await session.response_from_envoy_queue.get()
+                if isinstance(item, SessionAbort):
+                    break
+                if isinstance(item, EnvoyResponseBodyChunk):
+                    if item.data:
+                        await response.write(item.data)
+                    if item.is_last:
+                        break
+
+        await response.write_eof()
+        return response
+
+    except Exception as err:
+        logger.warning(
+            "Error in paired proxy request for %s: %s", session.request_id, err
+        )
+        session.abort(f"HTTP proxy error: {err}")
+        if not prepared:
+            status_code, err_msg = classify_upstream_error(err)
+            return web.Response(status=status_code, text=err_msg)
+        raise
+
+
 async def handle_proxy_request(request: web.Request) -> web.StreamResponse:
     """Handle incoming client HTTPS request and forward to target host."""
+    # Check if request has X-Ai-Proxy-Request-Id header for paired session routing
+    request_id = request.headers.get(REQUEST_ID_HEADER)
+    if request_id is not None:
+        session_registry: Optional[SessionRegistry] = request.app.get(
+            SESSION_REGISTRY_KEY
+        )
+        session = (
+            session_registry.get(request_id)
+            if session_registry is not None
+            else None
+        )
+        if session is None:
+            return web.Response(
+                status=400,
+                text=(
+                    f"400 Bad Request: Invalid or expired {REQUEST_ID_HEADER} "
+                    f"'{request_id}'"
+                ),
+            )
+        return await handle_paired_proxy_request(request, session)
+
+    # Standard proxying behavior when no X-Ai-Proxy-Request-Id is present:
     # 1. Determine target scheme from X-Forwarded-Proto
     x_proto = request.headers.get("X-Forwarded-Proto")
     if x_proto is not None:
@@ -112,7 +243,9 @@ async def client_session_cleanup_ctx(app: web.Application):
     """Context manager for managing aiohttp.ClientSession lifecycle."""
     config: ProxyConfig = app[CONFIG_KEY]
     upstream_ssl_ctx = app.get(UPSTREAM_SSL_KEY)
-    session = create_client_session(config=config, upstream_ssl_context=upstream_ssl_ctx)
+    session = create_client_session(
+        config=config, upstream_ssl_context=upstream_ssl_ctx
+    )
     app[CLIENT_SESSION_KEY] = session
 
     yield
@@ -123,6 +256,7 @@ async def client_session_cleanup_ctx(app: web.Application):
 def create_proxy_app(
     config: Optional[ProxyConfig] = None,
     upstream_ssl_context: Optional[ssl.SSLContext] = None,
+    session_registry: Optional[SessionRegistry] = None,
 ) -> web.Application:
     """Create and configure the proxy web.Application."""
     if config is None:
@@ -132,6 +266,8 @@ def create_proxy_app(
     app[CONFIG_KEY] = config
     if upstream_ssl_context is not None:
         app[UPSTREAM_SSL_KEY] = upstream_ssl_context
+    if session_registry is not None:
+        app[SESSION_REGISTRY_KEY] = session_registry
 
     app.cleanup_ctx.append(client_session_cleanup_ctx)
 
@@ -144,9 +280,10 @@ def create_proxy_app(
 async def run_proxy(
     config: ProxyConfig,
     ssl_context: ssl.SSLContext,
+    session_registry: SessionRegistry,
 ) -> None:
     """Initialize and run the HTTPS proxy server."""
-    app = create_proxy_app(config)
+    app = create_proxy_app(config=config, session_registry=session_registry)
     runner = web.AppRunner(app, keepalive_timeout=config.keepalive_timeout)
     await runner.setup()
 
@@ -165,7 +302,6 @@ async def run_proxy(
     )
 
     try:
-        while True:
-            await asyncio.sleep(3600)
+        await asyncio.Event().wait()
     finally:
         await runner.cleanup()

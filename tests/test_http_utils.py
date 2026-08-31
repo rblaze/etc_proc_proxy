@@ -37,6 +37,7 @@ class TestHttpUtils(unittest.IsolatedAsyncioTestCase):
             "X-Forwarded-For": "1.2.3.4",
             "X-Forwarded-Host": "attacker.com",
             "X-Forwarded-Proto": "http",
+            "X-Ai-Proxy-Request-Id": "req-12345",
             "X-Valid-Header": "KeepThis",
         }
 
@@ -55,6 +56,7 @@ class TestHttpUtils(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("X-Forwarded-For", filtered)
         self.assertNotIn("X-Forwarded-Host", filtered)
         self.assertNotIn("X-Forwarded-Proto", filtered)
+        self.assertNotIn("X-Ai-Proxy-Request-Id", filtered)
 
     def test_filter_request_headers_cimultidict(self):
         """Test filtering request headers from a CIMultiDictProxy."""
@@ -67,6 +69,7 @@ class TestHttpUtils(unittest.IsolatedAsyncioTestCase):
             ("X-Forwarded-For", "127.0.0.1"),
             ("X-Forwarded-Host", "example.org"),
             ("X-Forwarded-Proto", "https"),
+            ("X-Ai-Proxy-Request-Id", "uuid-789"),
         ])
         proxy = multidict.CIMultiDictProxy(md)
 
@@ -79,6 +82,7 @@ class TestHttpUtils(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("X-Forwarded-For", filtered)
         self.assertNotIn("X-Forwarded-Host", filtered)
         self.assertNotIn("X-Forwarded-Proto", filtered)
+        self.assertNotIn("X-Ai-Proxy-Request-Id", filtered)
 
     def test_filter_response_headers_dict(self):
         """Test filtering response headers from a dict."""
