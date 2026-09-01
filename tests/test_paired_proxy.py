@@ -233,7 +233,9 @@ class TestPairedProxy(unittest.IsolatedAsyncioTestCase):
             proxy_req_body = await call.read()
             self.assertTrue(proxy_req_body.HasField("request_body"))
             body_mut = proxy_req_body.request_body.response.body_mutation
-            self.assertEqual(body_mut.body, b"transformed request body")
+            self.assertTrue(body_mut.HasField("streamed_response"))
+            self.assertEqual(body_mut.streamed_response.body, b"transformed request body")
+            self.assertTrue(body_mut.streamed_response.end_of_stream)
 
             # 6. Envoy forwards to Target, Target replies.
             # Envoy sends ProcessingRequest(response_headers) & ProcessingRequest(response_body) on gRPC stream
@@ -272,10 +274,13 @@ class TestPairedProxy(unittest.IsolatedAsyncioTestCase):
 
             final_resp_body = await call.read()
             self.assertTrue(final_resp_body.HasField("response_body"))
+            final_body_mut = final_resp_body.response_body.response.body_mutation
+            self.assertTrue(final_body_mut.HasField("streamed_response"))
             self.assertEqual(
-                final_resp_body.response_body.response.body_mutation.body,
+                final_body_mut.streamed_response.body,
                 b"final postprocessed response from upstream service",
             )
+            self.assertTrue(final_body_mut.streamed_response.end_of_stream)
 
             # Verify Upstream Service received all intermediate data
             self.assertIn("request_id", received_by_upstream_service)
@@ -512,10 +517,13 @@ class TestPairedProxy(unittest.IsolatedAsyncioTestCase):
 
             final_resp_body = await call.read()
             self.assertTrue(final_resp_body.HasField("response_body"))
+            final_body_mut = final_resp_body.response_body.response.body_mutation
+            self.assertTrue(final_body_mut.HasField("streamed_response"))
             self.assertEqual(
-                final_resp_body.response_body.response.body_mutation.body,
+                final_body_mut.streamed_response.body,
                 b"upstream processed: data from target database",
             )
+            self.assertTrue(final_body_mut.streamed_response.end_of_stream)
 
     async def test_paired_proxy_request_with_x_forwarded_proto_http(self):
         """Test that X-Forwarded-Proto: http in paired HTTP proxy request sets :scheme to http in HeaderMutation."""
@@ -580,7 +588,10 @@ class TestPairedProxy(unittest.IsolatedAsyncioTestCase):
             # Read body mutation
             proxy_req_body = await call.read()
             self.assertTrue(proxy_req_body.HasField("request_body"))
-            self.assertEqual(proxy_req_body.request_body.response.body_mutation.body, b"ping")
+            body_mut = proxy_req_body.request_body.response.body_mutation
+            self.assertTrue(body_mut.HasField("streamed_response"))
+            self.assertEqual(body_mut.streamed_response.body, b"ping")
+            self.assertTrue(body_mut.streamed_response.end_of_stream)
 
             # 3. Envoy sends Target's response
             target_resp = external_processor_pb2.ProcessingRequest()
@@ -601,10 +612,13 @@ class TestPairedProxy(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(final_resp_hdrs.HasField("response_headers"))
             final_resp_body = await call.read()
             self.assertTrue(final_resp_body.HasField("response_body"))
+            final_body_mut = final_resp_body.response_body.response.body_mutation
+            self.assertTrue(final_body_mut.HasField("streamed_response"))
             self.assertEqual(
-                final_resp_body.response_body.response.body_mutation.body,
+                final_body_mut.streamed_response.body,
                 b"got: pong",
             )
+            self.assertTrue(final_body_mut.streamed_response.end_of_stream)
 
     async def test_paired_proxy_request_with_invalid_x_forwarded_proto(self):
         """Test that invalid X-Forwarded-Proto in paired HTTP proxy request returns 400 Bad Request."""

@@ -187,13 +187,22 @@ class ExternalProcessorService(external_processor_pb2_grpc.ExternalProcessorServ
                 )
 
                 if not is_empty_body:
-                    async for chunk in upstream_resp.content.iter_any():
+                    content_iter = upstream_resp.content.iter_any()
+                    try:
+                        prev_chunk = await anext(content_iter)
+                    except StopAsyncIteration:
                         await resp_queue.put(
-                            UpstreamBodyChunk(data=chunk, is_last=False)
+                            UpstreamBodyChunk(data=b"", is_last=True)
                         )
-
-                # Signal end of response body
-                await resp_queue.put(UpstreamBodyChunk(data=b"", is_last=True))
+                    else:
+                        async for next_chunk in content_iter:
+                            await resp_queue.put(
+                                UpstreamBodyChunk(data=prev_chunk, is_last=False)
+                            )
+                            prev_chunk = next_chunk
+                        await resp_queue.put(
+                            UpstreamBodyChunk(data=prev_chunk, is_last=True)
+                        )
 
         except Exception as err:
             status_code, err_msg = classify_upstream_error(err)
@@ -231,8 +240,12 @@ class ExternalProcessorService(external_processor_pb2_grpc.ExternalProcessorServ
                     break
                 if isinstance(body_item, UpstreamRequestBodyChunk):
                     if body_item.data or (body_item.is_last and not has_yielded_body):
+                        streamed_body = external_processor_pb2.StreamedBodyResponse(
+                            body=body_item.data,
+                            end_of_stream=body_item.is_last,
+                        )
                         body_mut = external_processor_pb2.BodyMutation(
-                            body=body_item.data
+                            streamed_response=streamed_body
                         )
                         body_common = external_processor_pb2.CommonResponse(
                             body_mutation=body_mut,
@@ -299,7 +312,13 @@ class ExternalProcessorService(external_processor_pb2_grpc.ExternalProcessorServ
                 # Upstream error after pairing
                 err_bytes = item.message.encode("utf-8")
                 hdr_mut = _build_header_mutation([], status_code=item.status)
-                body_mut = external_processor_pb2.BodyMutation(body=err_bytes)
+                streamed_body = external_processor_pb2.StreamedBodyResponse(
+                    body=err_bytes,
+                    end_of_stream=True,
+                )
+                body_mut = external_processor_pb2.BodyMutation(
+                    streamed_response=streamed_body
+                )
                 cr = external_processor_pb2.CommonResponse(
                     header_mutation=hdr_mut,
                     body_mutation=body_mut,
@@ -319,7 +338,13 @@ class ExternalProcessorService(external_processor_pb2_grpc.ExternalProcessorServ
                     break
 
             elif isinstance(item, UpstreamBodyChunk):
-                body_mut = external_processor_pb2.BodyMutation(body=item.data)
+                streamed_body = external_processor_pb2.StreamedBodyResponse(
+                    body=item.data,
+                    end_of_stream=item.is_last,
+                )
+                body_mut = external_processor_pb2.BodyMutation(
+                    streamed_response=streamed_body
+                )
                 cr = external_processor_pb2.CommonResponse(body_mutation=body_mut)
                 yield external_processor_pb2.ProcessingResponse(
                     response_body=external_processor_pb2.BodyResponse(response=cr)
