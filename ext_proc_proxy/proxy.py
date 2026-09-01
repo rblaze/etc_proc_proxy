@@ -42,12 +42,33 @@ async def stream_request_payload(request: web.Request) -> AsyncIterator[bytes]:
         yield chunk
 
 
+def _extract_scheme(request: web.Request) -> Tuple[Optional[str], Optional[web.Response]]:
+    """Extract and validate target scheme from X-Forwarded-Proto header."""
+    x_proto = request.headers.get("X-Forwarded-Proto")
+    if x_proto is not None:
+        proto_clean = x_proto.strip().lower()
+        if proto_clean in ("http", "https"):
+            return proto_clean, None
+        return None, web.Response(
+            status=400,
+            text=(
+                f"Invalid X-Forwarded-Proto header value '{x_proto}'. "
+                "Must be 'http' or 'https'."
+            ),
+        )
+    return "https", None
+
+
 async def handle_paired_proxy_request(
     request: web.Request,
     session: ExtProcSession,
 ) -> web.StreamResponse:
     """Handle request paired with an ext_proc session via X-Ai-Proxy-Request-Id."""
     session.is_paired = True
+    target_scheme, err_response = _extract_scheme(request)
+    if err_response is not None:
+        return err_response
+
     outgoing_headers = filter_request_headers(request.headers)
     req_headers_list = list(outgoing_headers.items())
     prepared = False
@@ -60,6 +81,7 @@ async def handle_paired_proxy_request(
                 path=str(request.rel_url),
                 headers=req_headers_list,
                 has_body=request.can_read_body,
+                scheme=target_scheme,
             )
         )
 
@@ -164,22 +186,9 @@ async def handle_proxy_request(request: web.Request) -> web.StreamResponse:
 
     # Standard proxying behavior when no X-Ai-Proxy-Request-Id is present:
     # 1. Determine target scheme from X-Forwarded-Proto
-    x_proto = request.headers.get("X-Forwarded-Proto")
-    if x_proto is not None:
-        proto_clean = x_proto.strip().lower()
-        if proto_clean in ("http", "https"):
-            target_scheme = proto_clean
-        else:
-            return web.Response(
-                status=400,
-                text=(
-                    f"Invalid X-Forwarded-Proto header value '{x_proto}'. "
-                    "Must be 'http' or 'https'."
-                ),
-            )
-    else:
-        # If the header is not present, assume HTTPS
-        target_scheme = "https"
+    target_scheme, err_response = _extract_scheme(request)
+    if err_response is not None:
+        return err_response
 
     # 2. Determine target host
     target_host = request.headers.get("Host") or request.host

@@ -16,6 +16,7 @@ class UpstreamRequestHeaders:
     path: str
     headers: List[Tuple[str, str]]
     has_body: bool
+    scheme: str
 
 
 @dataclass(frozen=True)

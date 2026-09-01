@@ -77,6 +77,9 @@ UpstreamResponseItem = Union[UpstreamHeaders, UpstreamBodyChunk, UpstreamError]
 def _build_header_mutation(
     headers: List[Tuple[str, str]],
     status_code: Optional[int] = None,
+    method: Optional[str] = None,
+    path: Optional[str] = None,
+    scheme: Optional[str] = None,
 ) -> external_processor_pb2.HeaderMutation:
     """Build a HeaderMutation protobuf message from key-value pairs."""
     mutation = external_processor_pb2.HeaderMutation()
@@ -84,6 +87,21 @@ def _build_header_mutation(
         opt = mutation.set_headers.add()
         opt.header.key = ":status"
         opt.header.raw_value = str(status_code).encode("utf-8")
+
+    if method is not None:
+        opt = mutation.set_headers.add()
+        opt.header.key = ":method"
+        opt.header.raw_value = method.encode("utf-8")
+
+    if path is not None:
+        opt = mutation.set_headers.add()
+        opt.header.key = ":path"
+        opt.header.raw_value = path.encode("utf-8")
+
+    if scheme is not None:
+        opt = mutation.set_headers.add()
+        opt.header.key = ":scheme"
+        opt.header.raw_value = scheme.encode("utf-8")
 
     for k, v in headers:
         opt = mutation.set_headers.add()
@@ -191,7 +209,12 @@ class ExternalProcessorService(external_processor_pb2_grpc.ExternalProcessorServ
     ) -> AsyncIterator[external_processor_pb2.ProcessingResponse]:
         """Handle PATH A: Paired mode when Upstream Service called HTTP Proxy."""
         # 1. Mutate request headers sent forward to Envoy Target
-        header_mutation = _build_header_mutation(proxy_first_item.headers)
+        header_mutation = _build_header_mutation(
+            headers=proxy_first_item.headers,
+            method=proxy_first_item.method,
+            path=proxy_first_item.path,
+            scheme=proxy_first_item.scheme,
+        )
         common_resp = external_processor_pb2.CommonResponse(
             header_mutation=header_mutation,
             status=external_processor_pb2.CommonResponse.ResponseStatus.CONTINUE,

@@ -480,6 +480,9 @@ class TestPairedProxy(unittest.IsolatedAsyncioTestCase):
                 for h in proxy_req_headers.request_headers.response.header_mutation.set_headers
             }
             self.assertEqual(mutated_hdrs.get("x-query-filter"), "active")
+            self.assertEqual(mutated_hdrs.get(":method"), "GET")
+            self.assertEqual(mutated_hdrs.get(":path"), "/api/get-info?id=42")
+            self.assertEqual(mutated_hdrs.get(":scheme"), "https")
             self.assertNotIn(REQUEST_ID_HEADER, mutated_hdrs)
 
             # 3. Envoy sends Target's response
@@ -513,6 +516,157 @@ class TestPairedProxy(unittest.IsolatedAsyncioTestCase):
                 final_resp_body.response_body.response.body_mutation.body,
                 b"upstream processed: data from target database",
             )
+
+    async def test_paired_proxy_request_with_x_forwarded_proto_http(self):
+        """Test that X-Forwarded-Proto: http in paired HTTP proxy request sets :scheme to http in HeaderMutation."""
+        proxy_port = await self._start_proxy_server()
+
+        async def mock_upstream_handler(request: web.Request):
+            req_id = request.headers.get(REQUEST_ID_HEADER)
+            connector = aiohttp.TCPConnector(ssl=self.client_ssl_ctx)
+            async with aiohttp.ClientSession(connector=connector) as client:
+                proxy_url = f"https://127.0.0.1:{proxy_port}/api/http-target"
+                headers = {
+                    REQUEST_ID_HEADER: req_id,
+                    "X-Forwarded-Proto": "http",
+                }
+                async with client.post(proxy_url, headers=headers, data=b"ping") as proxy_resp:
+                    target_body = await proxy_resp.text()
+
+            return web.Response(text=f"got: {target_body}", status=200)
+
+        upstream_port = await self._start_http_server(mock_upstream_handler)
+        grpc_port = await self._start_ext_proc_server(upstream_port)
+
+        creds = self._get_client_credentials()
+        async with grpc.aio.secure_channel(f"localhost:{grpc_port}", creds) as channel:
+            stub = external_processor_pb2_grpc.ExternalProcessorStub(channel)
+
+            input_queue: asyncio.Queue = asyncio.Queue()
+
+            async def request_generator():
+                while True:
+                    item = await input_queue.get()
+                    if item is None:
+                        break
+                    yield item
+
+            call = stub.Process(request_generator())
+
+            # 1. Send initial request from Envoy
+            req1 = external_processor_pb2.ProcessingRequest()
+            h1 = req1.request_headers.headers.headers.add()
+            h1.key = ":method"
+            h1.value = "GET"
+            h2 = req1.request_headers.headers.headers.add()
+            h2.key = ":path"
+            h2.value = "/initial"
+            req1.request_headers.end_of_stream = True
+            await input_queue.put(req1)
+
+            # 2. Receive request_headers mutation from Upstream Service via HTTP proxy
+            proxy_req_headers = await call.read()
+            self.assertTrue(proxy_req_headers.HasField("request_headers"))
+            mutated_hdrs = {
+                h.header.key: (h.header.raw_value.decode("utf-8") if h.header.raw_value else h.header.value)
+                for h in proxy_req_headers.request_headers.response.header_mutation.set_headers
+            }
+            self.assertEqual(mutated_hdrs.get(":method"), "POST")
+            self.assertEqual(mutated_hdrs.get(":path"), "/api/http-target")
+            self.assertEqual(mutated_hdrs.get(":scheme"), "http")
+            self.assertNotIn(REQUEST_ID_HEADER, mutated_hdrs)
+            self.assertNotIn("x-forwarded-proto", mutated_hdrs)
+
+            # Read body mutation
+            proxy_req_body = await call.read()
+            self.assertTrue(proxy_req_body.HasField("request_body"))
+            self.assertEqual(proxy_req_body.request_body.response.body_mutation.body, b"ping")
+
+            # 3. Envoy sends Target's response
+            target_resp = external_processor_pb2.ProcessingRequest()
+            th1 = target_resp.response_headers.headers.headers.add()
+            th1.key = ":status"
+            th1.value = "200"
+            target_resp.response_headers.end_of_stream = False
+            await input_queue.put(target_resp)
+
+            target_body = external_processor_pb2.ProcessingRequest()
+            target_body.response_body.body = b"pong"
+            target_body.response_body.end_of_stream = True
+            await input_queue.put(target_body)
+            await input_queue.put(None)
+
+            # 4. gRPC server returns final response
+            final_resp_hdrs = await call.read()
+            self.assertTrue(final_resp_hdrs.HasField("response_headers"))
+            final_resp_body = await call.read()
+            self.assertTrue(final_resp_body.HasField("response_body"))
+            self.assertEqual(
+                final_resp_body.response_body.response.body_mutation.body,
+                b"got: pong",
+            )
+
+    async def test_paired_proxy_request_with_invalid_x_forwarded_proto(self):
+        """Test that invalid X-Forwarded-Proto in paired HTTP proxy request returns 400 Bad Request."""
+        proxy_port = await self._start_proxy_server()
+
+        upstream_received_status = None
+
+        async def mock_upstream_handler(request: web.Request):
+            nonlocal upstream_received_status
+            req_id = request.headers.get(REQUEST_ID_HEADER)
+            connector = aiohttp.TCPConnector(ssl=self.client_ssl_ctx)
+            async with aiohttp.ClientSession(connector=connector) as client:
+                proxy_url = f"https://127.0.0.1:{proxy_port}/api/test"
+                headers = {
+                    REQUEST_ID_HEADER: req_id,
+                    "X-Forwarded-Proto": "ftp",
+                }
+                async with client.get(proxy_url, headers=headers) as proxy_resp:
+                    upstream_received_status = proxy_resp.status
+                    text = await proxy_resp.text()
+
+            return web.Response(text=text, status=upstream_received_status)
+
+        upstream_port = await self._start_http_server(mock_upstream_handler)
+        grpc_port = await self._start_ext_proc_server(upstream_port)
+
+        creds = self._get_client_credentials()
+        async with grpc.aio.secure_channel(f"localhost:{grpc_port}", creds) as channel:
+            stub = external_processor_pb2_grpc.ExternalProcessorStub(channel)
+
+            input_queue: asyncio.Queue = asyncio.Queue()
+
+            async def request_generator():
+                while True:
+                    item = await input_queue.get()
+                    if item is None:
+                        break
+                    yield item
+
+            call = stub.Process(request_generator())
+
+            # 1. Send initial request from Envoy
+            req1 = external_processor_pb2.ProcessingRequest()
+            h1 = req1.request_headers.headers.headers.add()
+            h1.key = ":method"
+            h1.value = "GET"
+            h2 = req1.request_headers.headers.headers.add()
+            h2.key = ":path"
+            h2.value = "/initial"
+            req1.request_headers.end_of_stream = True
+            await input_queue.put(req1)
+            await input_queue.put(None)
+
+            # 2. Upstream receives 400 from HTTP Proxy and returns direct response to gRPC
+            resp = await call.read()
+            self.assertTrue(resp.HasField("streamed_immediate_response"))
+            sir_hdrs = {
+                h.key: (h.raw_value.decode("utf-8") if h.raw_value else h.value)
+                for h in resp.streamed_immediate_response.headers_response.headers.headers
+            }
+            self.assertEqual(sir_hdrs.get(":status"), "400")
+            self.assertEqual(upstream_received_status, 400)
 
 
 if __name__ == "__main__":
