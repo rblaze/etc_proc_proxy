@@ -219,7 +219,10 @@ class TestPairedProxy(unittest.IsolatedAsyncioTestCase):
             hdr_mut = (
                 proxy_req_headers.request_headers.response.header_mutation.set_headers
             )
-            mutated_headers = {h.header.key: h.header.value for h in hdr_mut}
+            mutated_headers = {
+                h.header.key: (h.header.raw_value.decode("utf-8") if h.header.raw_value else h.header.value)
+                for h in hdr_mut
+            }
             self.assertEqual(
                 mutated_headers.get("x-transformed-header"), "AiEnriched"
             )
@@ -259,7 +262,8 @@ class TestPairedProxy(unittest.IsolatedAsyncioTestCase):
                 final_resp_hdrs.response_headers.response.header_mutation.set_headers
             )
             final_headers_dict = {
-                h.header.key: h.header.value for h in final_hdr_mut
+                h.header.key: (h.header.raw_value.decode("utf-8") if h.header.raw_value else h.header.value)
+                for h in final_hdr_mut
             }
             self.assertEqual(final_headers_dict.get(":status"), "200")
             self.assertEqual(
@@ -339,7 +343,10 @@ class TestPairedProxy(unittest.IsolatedAsyncioTestCase):
             first_resp = responses[0]
             self.assertTrue(first_resp.HasField("streamed_immediate_response"))
             sir_hdrs = first_resp.streamed_immediate_response.headers_response.headers.headers
-            hdrs_dict = {h.key: h.value for h in sir_hdrs}
+            hdrs_dict = {
+                h.key: (h.raw_value.decode("utf-8") if h.raw_value else h.value)
+                for h in sir_hdrs
+            }
             self.assertEqual(hdrs_dict.get(":status"), "403")
             self.assertEqual(hdrs_dict.get("x-blocked-by"), "Guardrail")
 
@@ -469,7 +476,7 @@ class TestPairedProxy(unittest.IsolatedAsyncioTestCase):
             proxy_req_headers = await call.read()
             self.assertTrue(proxy_req_headers.HasField("request_headers"))
             mutated_hdrs = {
-                h.header.key: h.header.value
+                h.header.key: (h.header.raw_value.decode("utf-8") if h.header.raw_value else h.header.value)
                 for h in proxy_req_headers.request_headers.response.header_mutation.set_headers
             }
             self.assertEqual(mutated_hdrs.get("x-query-filter"), "active")
@@ -494,7 +501,7 @@ class TestPairedProxy(unittest.IsolatedAsyncioTestCase):
             final_resp_hdrs = await call.read()
             self.assertTrue(final_resp_hdrs.HasField("response_headers"))
             final_hdr_mut = {
-                h.header.key: h.header.value
+                h.header.key: (h.header.raw_value.decode("utf-8") if h.header.raw_value else h.header.value)
                 for h in final_resp_hdrs.response_headers.response.header_mutation.set_headers
             }
             self.assertEqual(final_hdr_mut.get(":status"), "200")

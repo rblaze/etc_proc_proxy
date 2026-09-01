@@ -159,7 +159,8 @@ class TestExtProcServer(unittest.IsolatedAsyncioTestCase):
 
             # Check :status header and hop-by-hop filtered headers
             headers_dict = {
-                h.key: h.value for h in sir.headers_response.headers.headers
+                h.key: (h.raw_value.decode("utf-8") if h.raw_value else h.value)
+                for h in sir.headers_response.headers.headers
             }
             self.assertEqual(headers_dict.get(":status"), "200")
             self.assertEqual(headers_dict.get("x-backend-header"), "BackendVal")
@@ -232,7 +233,10 @@ class TestExtProcServer(unittest.IsolatedAsyncioTestCase):
             resp_headers = await call.read()
             self.assertTrue(resp_headers.HasField("streamed_immediate_response"))
             sir_hdrs = resp_headers.streamed_immediate_response.headers_response
-            headers_dict = {h.key: h.value for h in sir_hdrs.headers.headers}
+            headers_dict = {
+                h.key: (h.raw_value.decode("utf-8") if h.raw_value else h.value)
+                for h in sir_hdrs.headers.headers
+            }
             self.assertEqual(headers_dict.get(":status"), "200")
 
             # Receive body response
@@ -287,7 +291,7 @@ class TestExtProcServer(unittest.IsolatedAsyncioTestCase):
             self.assertGreater(len(responses), 2)
             first_resp = responses[0]
             headers_dict = {
-                h.key: h.value
+                h.key: (h.raw_value.decode("utf-8") if h.raw_value else h.value)
                 for h in first_resp.streamed_immediate_response.headers_response.headers.headers
             }
             self.assertEqual(headers_dict.get(":status"), "200")
@@ -327,7 +331,7 @@ class TestExtProcServer(unittest.IsolatedAsyncioTestCase):
             self.assertGreaterEqual(len(responses), 1)
             first_resp = responses[0]
             headers_dict = {
-                h.key: h.value
+                h.key: (h.raw_value.decode("utf-8") if h.raw_value else h.value)
                 for h in first_resp.streamed_immediate_response.headers_response.headers.headers
             }
             self.assertEqual(headers_dict.get(":status"), "502")
@@ -363,7 +367,7 @@ class TestExtProcServer(unittest.IsolatedAsyncioTestCase):
             self.assertGreaterEqual(len(responses), 1)
             first_resp = responses[0]
             headers_dict = {
-                h.key: h.value
+                h.key: (h.raw_value.decode("utf-8") if h.raw_value else h.value)
                 for h in first_resp.streamed_immediate_response.headers_response.headers.headers
             }
             self.assertEqual(headers_dict.get(":status"), "504")
@@ -457,7 +461,10 @@ class TestExtProcServer(unittest.IsolatedAsyncioTestCase):
                 responses.append(resp)
 
             sir_headers = responses[0].streamed_immediate_response.headers_response.headers.headers
-            headers_dict = {h.key: h.value for h in sir_headers}
+            headers_dict = {
+                h.key: (h.raw_value.decode("utf-8") if h.raw_value else h.value)
+                for h in sir_headers
+            }
             self.assertEqual(headers_dict.get("content-encoding"), "gzip")
 
             received_body = b"".join(
@@ -514,7 +521,7 @@ class TestExtProcServer(unittest.IsolatedAsyncioTestCase):
                     responses.append(resp)
 
                 headers_dict = {
-                    h.key: h.value
+                    h.key: (h.raw_value.decode("utf-8") if h.raw_value else h.value)
                     for h in responses[0].streamed_immediate_response.headers_response.headers.headers
                 }
                 self.assertEqual(headers_dict.get(":status"), "200")

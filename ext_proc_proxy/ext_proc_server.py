@@ -83,12 +83,12 @@ def _build_header_mutation(
     if status_code is not None:
         opt = mutation.set_headers.add()
         opt.header.key = ":status"
-        opt.header.value = str(status_code)
+        opt.header.raw_value = str(status_code).encode("utf-8")
 
     for k, v in headers:
         opt = mutation.set_headers.add()
         opt.header.key = k.lower()
-        opt.header.value = str(v)
+        opt.header.raw_value = v.encode("utf-8") if isinstance(v, str) else bytes(v)
     return mutation
 
 
@@ -321,10 +321,10 @@ class ExternalProcessorService(external_processor_pb2_grpc.ExternalProcessorServ
                 sir = external_processor_pb2.StreamedImmediateResponse()
                 h_status = sir.headers_response.headers.headers.add()
                 h_status.key = ":status"
-                h_status.value = str(item.status)
+                h_status.raw_value = str(item.status).encode("utf-8")
                 h_ct = sir.headers_response.headers.headers.add()
                 h_ct.key = "content-type"
-                h_ct.value = "text/plain"
+                h_ct.raw_value = b"text/plain"
                 sir.headers_response.end_of_stream = False
                 yield external_processor_pb2.ProcessingResponse(
                     streamed_immediate_response=sir
@@ -342,12 +342,12 @@ class ExternalProcessorService(external_processor_pb2_grpc.ExternalProcessorServ
                 sir = external_processor_pb2.StreamedImmediateResponse()
                 h_status = sir.headers_response.headers.headers.add()
                 h_status.key = ":status"
-                h_status.value = str(item.status)
+                h_status.raw_value = str(item.status).encode("utf-8")
 
                 for k, v in item.headers:
                     hv = sir.headers_response.headers.headers.add()
                     hv.key = k.lower()
-                    hv.value = str(v)
+                    hv.raw_value = v.encode("utf-8") if isinstance(v, str) else bytes(v)
 
                 sir.headers_response.end_of_stream = item.is_empty_body
                 yield external_processor_pb2.ProcessingResponse(
