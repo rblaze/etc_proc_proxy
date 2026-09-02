@@ -203,6 +203,9 @@ class TestPairedProxy(unittest.IsolatedAsyncioTestCase):
             h2 = req1.request_headers.headers.headers.add()
             h2.key = ":path"
             h2.value = "/initial/path"
+            h3 = req1.request_headers.headers.headers.add()
+            h3.key = "x-client-dropped"
+            h3.value = "drop-me"
             req1.request_headers.end_of_stream = False
             await input_queue.put(req1)
 
@@ -228,6 +231,11 @@ class TestPairedProxy(unittest.IsolatedAsyncioTestCase):
             )
             # Ensure internal request ID was stripped from outgoing request to Target
             self.assertNotIn(REQUEST_ID_HEADER, mutated_headers)
+            # Ensure dropped header is in remove_headers
+            self.assertIn(
+                "x-client-dropped",
+                list(proxy_req_headers.request_headers.response.header_mutation.remove_headers),
+            )
 
             # 5. gRPC server sends BodyMutation for the proxy request body
             proxy_req_body = await call.read()
@@ -270,6 +278,10 @@ class TestPairedProxy(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(final_headers_dict.get(":status"), "200")
             self.assertEqual(
                 final_headers_dict.get("x-final-service-header"), "FinalVal"
+            )
+            self.assertIn(
+                "x-target-custom",
+                list(final_resp_hdrs.response_headers.response.header_mutation.remove_headers),
             )
 
             final_resp_body = await call.read()
@@ -681,6 +693,116 @@ class TestPairedProxy(unittest.IsolatedAsyncioTestCase):
             }
             self.assertEqual(sir_hdrs.get(":status"), "400")
             self.assertEqual(upstream_received_status, 400)
+
+    async def test_header_mutation_removes_unmatched_headers(self):
+        """Test that HeaderMutation properly populates remove_headers for both request and response headers."""
+        proxy_port = await self._start_proxy_server()
+
+        async def mock_upstream_handler(request: web.Request):
+            req_id = request.headers.get(REQUEST_ID_HEADER)
+            connector = aiohttp.TCPConnector(ssl=self.client_ssl_ctx)
+            async with aiohttp.ClientSession(connector=connector) as client:
+                proxy_url = f"https://127.0.0.1:{proxy_port}/api/endpoint"
+                # Keep one header (different case), add a new header, drop x-dropped-from-req
+                headers = {
+                    REQUEST_ID_HEADER: req_id,
+                    "X-Forwarded-Proto": "https",
+                    "X-Kept-Req-Header": "kept-val",
+                    "X-New-Req-Header": "new-val",
+                }
+                async with client.get(proxy_url, headers=headers) as proxy_resp:
+                    target_body = await proxy_resp.text()
+
+            # For final response: keep x-kept-resp, omit x-target-dropped, add x-new-resp
+            resp_headers = {
+                "x-kept-resp-header": "kept-resp-val",
+                "x-new-resp-header": "new-resp-val",
+            }
+            return web.Response(text=f"done: {target_body}", headers=resp_headers, status=200)
+
+        upstream_port = await self._start_http_server(mock_upstream_handler)
+        grpc_port = await self._start_ext_proc_server(upstream_port)
+
+        creds = self._get_client_credentials()
+        async with grpc.aio.secure_channel(f"localhost:{grpc_port}", creds) as channel:
+            stub = external_processor_pb2_grpc.ExternalProcessorStub(channel)
+
+            input_queue: asyncio.Queue = asyncio.Queue()
+
+            async def request_generator():
+                while True:
+                    item = await input_queue.get()
+                    if item is None:
+                        break
+                    yield item
+
+            call = stub.Process(request_generator())
+
+            # 1. Send initial request from Envoy with headers to be kept, dropped, or pseudo
+            req1 = external_processor_pb2.ProcessingRequest()
+            h1 = req1.request_headers.headers.headers.add()
+            h1.key = ":method"
+            h1.value = "GET"
+            h2 = req1.request_headers.headers.headers.add()
+            h2.key = ":path"
+            h2.value = "/initial"
+            h3 = req1.request_headers.headers.headers.add()
+            h3.key = "x-kept-req-header"
+            h3.value = "original-kept-val"
+            h4 = req1.request_headers.headers.headers.add()
+            h4.key = "X-Dropped-From-Req"
+            h4.value = "drop-this"
+            req1.request_headers.end_of_stream = True
+            await input_queue.put(req1)
+
+            # 2. Receive request_headers mutation
+            proxy_req_headers = await call.read()
+            self.assertTrue(proxy_req_headers.HasField("request_headers"))
+            req_hdr_mutation = proxy_req_headers.request_headers.response.header_mutation
+            req_removed = list(req_hdr_mutation.remove_headers)
+
+            # X-Dropped-From-Req must be in remove_headers (lowercased)
+            self.assertIn("x-dropped-from-req", req_removed)
+            # x-kept-req-header and pseudo-headers must NOT be in remove_headers
+            self.assertNotIn("x-kept-req-header", req_removed)
+            self.assertNotIn(":method", req_removed)
+            self.assertNotIn(":path", req_removed)
+
+            # 3. Envoy sends Target's response with headers to be kept and dropped
+            target_resp = external_processor_pb2.ProcessingRequest()
+            th1 = target_resp.response_headers.headers.headers.add()
+            th1.key = ":status"
+            th1.value = "200"
+            th2 = target_resp.response_headers.headers.headers.add()
+            th2.key = "x-kept-resp-header"
+            th2.value = "original-target-val"
+            th3 = target_resp.response_headers.headers.headers.add()
+            th3.key = "X-Target-Dropped"
+            th3.value = "target-secret"
+            target_resp.response_headers.end_of_stream = False
+            await input_queue.put(target_resp)
+
+            target_body = external_processor_pb2.ProcessingRequest()
+            target_body.response_body.body = b"data"
+            target_body.response_body.end_of_stream = True
+            await input_queue.put(target_body)
+            await input_queue.put(None)
+
+            # 4. Receive response_headers mutation
+            final_resp_hdrs = await call.read()
+            self.assertTrue(final_resp_hdrs.HasField("response_headers"))
+            resp_hdr_mutation = final_resp_hdrs.response_headers.response.header_mutation
+            resp_removed = list(resp_hdr_mutation.remove_headers)
+
+            # X-Target-Dropped must be in remove_headers
+            self.assertIn("x-target-dropped", resp_removed)
+            # x-kept-resp-header and :status must NOT be in remove_headers
+            self.assertNotIn("x-kept-resp-header", resp_removed)
+            self.assertNotIn(":status", resp_removed)
+
+            # Receive body
+            final_resp_body = await call.read()
+            self.assertTrue(final_resp_body.HasField("response_body"))
 
 
 if __name__ == "__main__":

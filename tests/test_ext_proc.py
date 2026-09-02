@@ -20,7 +20,10 @@ from ext_proc_proxy.cert_utils import (
     generate_self_signed_cert,
 )
 from ext_proc_proxy.config import ProxyConfig
-from ext_proc_proxy.ext_proc_server import create_ext_proc_server
+from ext_proc_proxy.ext_proc_server import (
+    _build_header_mutation,
+    create_ext_proc_server,
+)
 
 
 class TestExtProcServer(unittest.IsolatedAsyncioTestCase):
@@ -536,6 +539,39 @@ class TestExtProcServer(unittest.IsolatedAsyncioTestCase):
             for f in (backend_cert, backend_key):
                 if os.path.exists(f):
                     os.remove(f)
+
+    def test_build_header_mutation_remove_headers(self):
+        """Test _build_header_mutation calculates remove_headers diffing accurately."""
+        # 1. Without original_headers, remove_headers is empty
+        m1 = _build_header_mutation([("x-foo", "bar")])
+        self.assertEqual(len(m1.remove_headers), 0)
+
+        # 2. Original headers contains headers omitted in new headers
+        orig = [":method", ":path", "Host", "X-Keep", "X-Drop-1", "x-drop-2"]
+        new_hdrs = [("x-keep", "new-val"), ("x-added", "val")]
+        m2 = _build_header_mutation(
+            new_hdrs,
+            status_code=200,
+            method="GET",
+            path="/test",
+            scheme="https",
+            original_headers=orig,
+        )
+        # Should exclude :method, :path, Host, and x-keep
+        # Should include sorted lowercase of x-drop-1 and x-drop-2
+        self.assertEqual(list(m2.remove_headers), ["x-drop-1", "x-drop-2"])
+
+        # Check set_headers
+        set_map = {
+            h.header.key: (h.header.raw_value.decode("utf-8") if h.header.raw_value else h.header.value)
+            for h in m2.set_headers
+        }
+        self.assertEqual(set_map.get(":status"), "200")
+        self.assertEqual(set_map.get(":method"), "GET")
+        self.assertEqual(set_map.get(":path"), "/test")
+        self.assertEqual(set_map.get(":scheme"), "https")
+        self.assertEqual(set_map.get("x-keep"), "new-val")
+        self.assertEqual(set_map.get("x-added"), "val")
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ import asyncio
 from dataclasses import dataclass
 import logging
 import ssl
-from typing import AsyncIterator, Dict, List, Optional, Tuple, Union
+from typing import AsyncIterator, Dict, Iterable, List, Optional, Tuple, Union
 from urllib.parse import urlparse
 import uuid
 
@@ -80,6 +80,7 @@ def _build_header_mutation(
     method: Optional[str] = None,
     path: Optional[str] = None,
     scheme: Optional[str] = None,
+    original_headers: Optional[Iterable[str]] = None,
 ) -> external_processor_pb2.HeaderMutation:
     """Build a HeaderMutation protobuf message from key-value pairs."""
     mutation = external_processor_pb2.HeaderMutation()
@@ -103,10 +104,22 @@ def _build_header_mutation(
         opt.header.key = ":scheme"
         opt.header.raw_value = scheme.encode("utf-8")
 
+    new_keys = set()
     for k, v in headers:
         opt = mutation.set_headers.add()
         opt.header.key = k.lower()
         opt.header.raw_value = v.encode("utf-8") if isinstance(v, str) else bytes(v)
+        new_keys.add(k.lower())
+
+    if original_headers is not None:
+        to_remove = {
+            k.lower()
+            for k in original_headers
+            if not k.startswith(":") and k.lower() != "host" and k.lower() not in new_keys
+        }
+        for rh in sorted(to_remove):
+            mutation.remove_headers.append(rh)
+
     return mutation
 
 
@@ -215,6 +228,7 @@ class ExternalProcessorService(external_processor_pb2_grpc.ExternalProcessorServ
         ext_proc_session: ExtProcSession,
         request_iterator: AsyncIterator[external_processor_pb2.ProcessingRequest],
         resp_queue: asyncio.Queue[UpstreamResponseItem],
+        original_request_headers: Optional[Iterable[str]] = None,
     ) -> AsyncIterator[external_processor_pb2.ProcessingResponse]:
         """Handle PATH A: Paired mode when Upstream Service called HTTP Proxy."""
         # 1. Mutate request headers sent forward to Envoy Target
@@ -223,6 +237,7 @@ class ExternalProcessorService(external_processor_pb2_grpc.ExternalProcessorServ
             method=proxy_first_item.method,
             path=proxy_first_item.path,
             scheme=proxy_first_item.scheme,
+            original_headers=original_request_headers,
         )
         common_resp = external_processor_pb2.CommonResponse(
             header_mutation=header_mutation,
@@ -265,6 +280,7 @@ class ExternalProcessorService(external_processor_pb2_grpc.ExternalProcessorServ
         # response, one that happens before full request body is sent to the target.
         #
         # 3. Read response from Target via Envoy (response_headers / response_body)
+        target_response_headers: List[str] = []
         async for req in request_iterator:
             if req.HasField("response_headers"):
                 raw_resp_headers: Dict[str, str] = {}
@@ -272,6 +288,9 @@ class ExternalProcessorService(external_processor_pb2_grpc.ExternalProcessorServ
                     raw_resp_headers[h.key] = h.value or (
                         h.raw_value.decode("utf-8", "ignore") if h.raw_value else ""
                     )
+                target_response_headers = [
+                    h.key for h in req.response_headers.headers.headers
+                ]
 
                 status_str = raw_resp_headers.get(":status", "200")
                 try:
@@ -312,7 +331,11 @@ class ExternalProcessorService(external_processor_pb2_grpc.ExternalProcessorServ
             if isinstance(item, UpstreamError):
                 # Upstream error after pairing
                 err_bytes = item.message.encode("utf-8")
-                hdr_mut = _build_header_mutation([], status_code=item.status)
+                hdr_mut = _build_header_mutation(
+                    [],
+                    status_code=item.status,
+                    original_headers=target_response_headers,
+                )
                 streamed_body = external_processor_pb2.StreamedBodyResponse(
                     body=err_bytes,
                     end_of_stream=True,
@@ -330,7 +353,11 @@ class ExternalProcessorService(external_processor_pb2_grpc.ExternalProcessorServ
                 break
 
             elif isinstance(item, UpstreamHeaders):
-                hdr_mut = _build_header_mutation(item.headers, status_code=item.status)
+                hdr_mut = _build_header_mutation(
+                    item.headers,
+                    status_code=item.status,
+                    original_headers=target_response_headers,
+                )
                 cr = external_processor_pb2.CommonResponse(header_mutation=hdr_mut)
                 yield external_processor_pb2.ProcessingResponse(
                     response_headers=external_processor_pb2.HeadersResponse(response=cr)
@@ -449,6 +476,9 @@ class ExternalProcessorService(external_processor_pb2_grpc.ExternalProcessorServ
                 raw_headers[h.key] = h.value or (
                     h.raw_value.decode("utf-8", "ignore") if h.raw_value else ""
                 )
+            original_request_headers = [
+                h.key for h in first_request.request_headers.headers.headers
+            ]
 
             method = raw_headers.get(":method", "GET").upper()
             path = raw_headers.get(":path", "/")
@@ -526,6 +556,7 @@ class ExternalProcessorService(external_processor_pb2_grpc.ExternalProcessorServ
                         ext_proc_session=ext_proc_session,
                         request_iterator=request_iterator,
                         resp_queue=resp_queue,
+                        original_request_headers=original_request_headers,
                     ):
                         yield resp
             else:
