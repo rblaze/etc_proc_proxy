@@ -64,6 +64,7 @@ async def handle_paired_proxy_request(
     session: ExtProcSession,
 ) -> web.StreamResponse:
     """Handle request paired with an ext_proc session via X-Ai-Proxy-Request-Id."""
+    logger.info("gRPC proxy request: %s %s", request.method, request.url)
     session.is_paired = True
     target_scheme, err_response = _extract_scheme(request)
     if err_response is not None:
@@ -184,6 +185,7 @@ async def handle_proxy_request(request: web.Request) -> web.StreamResponse:
             )
         return await handle_paired_proxy_request(request, session)
 
+    logger.info("Direct request: %s %s", request.method, request.url)
     # Standard proxying behavior when no X-Ai-Proxy-Request-Id is present:
     # 1. Determine target scheme from X-Forwarded-Proto
     target_scheme, err_response = _extract_scheme(request)
