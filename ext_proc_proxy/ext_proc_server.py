@@ -115,7 +115,7 @@ def _build_header_mutation(
         to_remove = {
             k.lower()
             for k in original_headers
-            if not k.startswith(":") and k.lower() != "host" and k.lower() not in new_keys
+            if not k.startswith(":") and k.lower() != "host" and k.lower() != "x-forwarded-proto" and k.lower() not in new_keys
         }
         for rh in sorted(to_remove):
             mutation.remove_headers.append(rh)

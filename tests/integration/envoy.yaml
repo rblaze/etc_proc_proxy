@@ -1,4 +1,10 @@
 # Header-based ext_proc session affinity.
+admin:
+  address:
+    socket_address:
+      protocol: TCP
+      address: 0.0.0.0
+      port_value: 9901
 static_resources:
   listeners:
   - name: listener_0
