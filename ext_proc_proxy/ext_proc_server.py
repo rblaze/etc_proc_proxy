@@ -227,6 +227,7 @@ class ExternalProcessorService(external_processor_pb2_grpc.ExternalProcessorServ
         common_resp = external_processor_pb2.CommonResponse(
             header_mutation=header_mutation,
             status=external_processor_pb2.CommonResponse.ResponseStatus.CONTINUE,
+            clear_route_cache=True,
         )
         headers_resp = external_processor_pb2.HeadersResponse(response=common_resp)
         yield external_processor_pb2.ProcessingResponse(request_headers=headers_resp)
@@ -467,6 +468,8 @@ class ExternalProcessorService(external_processor_pb2_grpc.ExternalProcessorServ
             outgoing_headers = filter_request_headers(raw_headers)
             outgoing_headers[REQUEST_ID_HEADER] = request_id
             outgoing_headers["Host"] = self.target_url_parsed.netloc
+            # Disable retries, we have no way to handle them.
+            outgoing_headers["x-litellm-num-retries"] = "0"
 
             has_request_body = not first_request.request_headers.end_of_stream
             body_queue: Optional[asyncio.Queue[RequestBodyChunk]] = (
