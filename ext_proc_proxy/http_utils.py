@@ -49,14 +49,14 @@ def _get_connection_tokens(headers: Mapping[str, str]) -> Set[str]:
         return set()
 
     return {
-        token.strip().lower()
-        for token in connection_val.split(",")
-        if token.strip()
+        token.strip().lower() for token in connection_val.split(",") if token.strip()
     }
 
 
 def filter_request_headers(
-    headers: Union[Mapping[str, str], multidict.CIMultiDictProxy, multidict.CIMultiDict],
+    headers: Union[
+        Mapping[str, str], multidict.CIMultiDictProxy, multidict.CIMultiDict
+    ],
 ) -> multidict.CIMultiDict:
     """Filter pseudo-headers, hop-by-hop headers, and excluded headers from incoming request headers."""
     filtered = multidict.CIMultiDict()
@@ -71,7 +71,9 @@ def filter_request_headers(
 
 
 def filter_response_headers(
-    headers: Union[Mapping[str, str], multidict.CIMultiDictProxy, multidict.CIMultiDict],
+    headers: Union[
+        Mapping[str, str], multidict.CIMultiDictProxy, multidict.CIMultiDict
+    ],
 ) -> multidict.CIMultiDict:
     """Filter pseudo-headers and hop-by-hop headers from upstream response headers."""
     filtered = multidict.CIMultiDict()

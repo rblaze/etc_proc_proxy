@@ -42,7 +42,9 @@ async def stream_request_payload(request: web.Request) -> AsyncIterator[bytes]:
         yield chunk
 
 
-def _extract_scheme(request: web.Request) -> Tuple[Optional[str], Optional[web.Response]]:
+def _extract_scheme(
+    request: web.Request,
+) -> Tuple[Optional[str], Optional[web.Response]]:
     """Extract and validate target scheme from X-Forwarded-Proto header."""
     x_proto = request.headers.get("X-Forwarded-Proto")
     if x_proto is not None:
@@ -171,9 +173,7 @@ async def handle_proxy_request(request: web.Request) -> web.StreamResponse:
             SESSION_REGISTRY_KEY
         )
         session = (
-            session_registry.get(request_id)
-            if session_registry is not None
-            else None
+            session_registry.get(request_id) if session_registry is not None else None
         )
         if session is None:
             return web.Response(

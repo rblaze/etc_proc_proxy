@@ -112,10 +112,13 @@ def _build_header_mutation(
         new_keys.add(k.lower())
 
     if original_headers is not None:
+        # Envoy's routing breaks without x-forwarded-proto, keep this header
         to_remove = {
             k.lower()
             for k in original_headers
-            if not k.startswith(":") and k.lower() != "host" and k.lower() != "x-forwarded-proto" and k.lower() not in new_keys
+            if not k.startswith(":")
+            and k.lower() != "x-forwarded-proto"
+            and k.lower() not in new_keys
         }
         for rh in sorted(to_remove):
             mutation.remove_headers.append(rh)
@@ -204,9 +207,7 @@ class ExternalProcessorService(external_processor_pb2_grpc.ExternalProcessorServ
                     try:
                         prev_chunk = await anext(content_iter)
                     except StopAsyncIteration:
-                        await resp_queue.put(
-                            UpstreamBodyChunk(data=b"", is_last=True)
-                        )
+                        await resp_queue.put(UpstreamBodyChunk(data=b"", is_last=True))
                     else:
                         async for next_chunk in content_iter:
                             await resp_queue.put(
