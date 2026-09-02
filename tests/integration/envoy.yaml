@@ -25,7 +25,7 @@ static_resources:
               - match:
                   prefix: "/"
                 route:
-                  cluster: origin
+                  cluster: dynamic_forward_proxy_cluster
           http_filters:
           - name: envoy.filters.http.ext_proc
             typed_config:
@@ -38,20 +38,71 @@ static_resources:
                 response_body_mode: FULL_DUPLEX_STREAMED
                 request_trailer_mode: SEND
                 response_trailer_mode: SEND
+              mutation_rules:
+                allow_all_routing: true
+          - name: envoy.filters.http.dynamic_forward_proxy
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.dynamic_forward_proxy.v3.FilterConfig
+              dns_cache_config:
+                name: dynamic_forward_proxy_cache_config
+                dns_lookup_family: V4_ONLY
+                # DNS Cache Circuit Breaker Configuration
+                dns_cache_circuit_breaker:
+                  max_pending_requests: 1024
+                typed_dns_resolver_config:
+                  name: envoy.network.dns_resolver.cares
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.network.dns_resolver.cares.v3.CaresDnsResolverConfig
+                    resolvers:
+                    - socket_address:
+                        address: "8.8.8.8"
+                        port_value: 53
+                    dns_resolver_options:
+                      use_tcp_for_dns_lookups: true
+                      no_default_search_domain: true
           - name: envoy.filters.http.router
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
   clusters:
-  - name: origin
-    load_assignment:
-      cluster_name: origin
-      endpoints:
-      - lb_endpoints:
-        - endpoint:
-            address:
-              socket_address:
-                address: 127.0.0.1
-                port_value: 8080
+  - name: dynamic_forward_proxy_cluster
+    lb_policy: CLUSTER_PROVIDED
+    # Standard Cluster Circuit Breaker Configuration
+    circuit_breakers:
+      thresholds:
+      - priority: DEFAULT
+        max_connections: 1024
+        max_pending_requests: 1024
+        max_requests: 1024
+        max_retries: 3
+    cluster_type:
+      name: envoy.clusters.dynamic_forward_proxy
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.clusters.dynamic_forward_proxy.v3.ClusterConfig
+        dns_cache_config:
+          name: dynamic_forward_proxy_cache_config
+          dns_lookup_family: V4_ONLY
+          # DNS Cache Circuit Breaker Configuration (same as above)
+          dns_cache_circuit_breaker:
+            max_pending_requests: 1024
+          typed_dns_resolver_config:
+            name: envoy.network.dns_resolver.cares
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.network.dns_resolver.cares.v3.CaresDnsResolverConfig
+              resolvers:
+              - socket_address:
+                  address: "8.8.8.8"
+                  port_value: 53
+              dns_resolver_options:
+                use_tcp_for_dns_lookups: true
+                no_default_search_domain: true
+    transport_socket:
+      name: envoy.transport_sockets.tls
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+        common_tls_context:
+          # Explicitly accept untrusted/self-signed certificates
+          validation_context:
+            trust_chain_verification: ACCEPT_UNTRUSTED
   - name: ext_proc_cluster
     load_assignment:
       cluster_name: ext_proc_cluster

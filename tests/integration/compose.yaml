@@ -5,6 +5,6 @@ services:
       - "10000:10000"
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    command: --config-path /etc/envoy/envoy.yaml --file-flush-interval-msec 0 --file-flush-min-size-kb 0
+    command: --config-path /etc/envoy/envoy.yaml --file-flush-interval-msec 0 --file-flush-min-size-kb 0 # --component-log-level router:debug
     volumes:
       - ./envoy.yaml:/etc/envoy/envoy.yaml
