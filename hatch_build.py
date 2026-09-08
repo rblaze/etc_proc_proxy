@@ -33,10 +33,12 @@ class CustomBuildHook(BuildHookInterface):
         except FileExistsError:
             pass
 
+        proto_include = protoc._get_resource_file_name("grpc_tools", "_proto")
         exit_code = protoc.main(
             [
                 "grpc_tools.protoc",
                 "-I=proto",
+                f"-I={proto_include}",
                 "--python_out=src/ext_proc_proxy/protogen",
                 "--grpc_python_out=src/ext_proc_proxy/protogen",
             ]

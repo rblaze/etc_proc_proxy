@@ -44,10 +44,15 @@ Dependencies are installed in the local virtual environment `.venv`. Protobuf st
 
 ## Usage
 
+### Prep
+```bash
+uv sync
+```
+
 ### Run Both Servers (Testing with Self-Signed Certificate)
 
 ```bash
-PYTHONPATH=.gen .venv/bin/python -m ext_proc_proxy \
+uv run ext-proc-proxy \
   --self-signed \
   --port 8443 \
   --ext-proc-port 50051 \
@@ -57,7 +62,7 @@ PYTHONPATH=.gen .venv/bin/python -m ext_proc_proxy \
 ### Run with Custom Certificate and Key
 
 ```bash
-PYTHONPATH=.gen .venv/bin/python -m ext_proc_proxy \
+uv run ext-proc-proxy \
   --cert /path/to/cert.pem \
   --key /path/to/key.pem \
   --port 8443 \
@@ -88,5 +93,5 @@ PYTHONPATH=.gen .venv/bin/python -m ext_proc_proxy \
 Run all unit and integration tests:
 
 ```bash
-PYTHONPATH=.gen .venv/bin/python -m unittest discover -s tests
+uv run python -m unittest
 ```
