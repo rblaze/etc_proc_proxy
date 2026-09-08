@@ -1,4 +1,15 @@
-/.venv/
-/.gen/
-/.vscode/
+# Python-generated files
 __pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+/.venv/
+
+/.vscode/
+/GEMINI.md
+/ruff*.toml
+/src/ext_proc_proxy/protogen/

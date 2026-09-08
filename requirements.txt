@@ -1,4 +1,0 @@
-aiodns
-aiohttp
-grpcio
-grpcio-tools

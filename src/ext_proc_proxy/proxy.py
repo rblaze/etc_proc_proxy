@@ -44,7 +44,7 @@ async def stream_request_payload(request: web.Request) -> AsyncIterator[bytes]:
 
 def _extract_scheme(
     request: web.Request,
-) -> Tuple[Optional[str], Optional[web.Response]]:
+) -> tuple[Optional[str], Optional[web.Response]]:
     """Extract and validate target scheme from X-Forwarded-Proto header."""
     x_proto = request.headers.get("X-Forwarded-Proto")
     if x_proto is not None:

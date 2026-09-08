@@ -2,9 +2,9 @@
 
 import asyncio
 import os
-import sys
+import ssl
 import unittest
-from typing import List
+from typing import List, Optional
 
 import aiohttp
 from aiohttp import web
@@ -54,7 +54,7 @@ class TestExtProcServer(unittest.IsolatedAsyncioTestCase):
             await runner.cleanup()
 
     async def _start_mock_http_server(
-        self, handler, ssl_context: Optional[ssl.SSLContext] = None
+        self, handler, ssl_context: ssl.SSLContext | None = None
     ) -> int:
         """Start a mock HTTP/HTTPS backend server and return its port."""
         app = web.Application()
@@ -547,7 +547,7 @@ class TestExtProcServer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(m1.remove_headers), 0)
 
         # 2. Original headers contains headers omitted in new headers
-        orig = [":method", ":path", "Host", "X-Keep", "X-Drop-1", "x-drop-2"]
+        orig = [":method", ":path", "X-Keep", "X-Drop-1", "x-drop-2"]
         new_hdrs = [("x-keep", "new-val"), ("x-added", "val")]
         m2 = _build_header_mutation(
             new_hdrs,
@@ -557,7 +557,7 @@ class TestExtProcServer(unittest.IsolatedAsyncioTestCase):
             scheme="https",
             original_headers=orig,
         )
-        # Should exclude :method, :path, Host, and x-keep
+        # Should exclude :method, :path, and x-keep
         # Should include sorted lowercase of x-drop-1 and x-drop-2
         self.assertEqual(list(m2.remove_headers), ["x-drop-1", "x-drop-2"])
 

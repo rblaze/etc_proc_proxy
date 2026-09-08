@@ -1,0 +1,25 @@
+[project]
+name = "ext-proc-proxy"
+version = "0.1.0"
+description = "Proxy between LiteLLM and AI Gateway"
+readme = "README.md"
+authors = [
+    { name = "Andrey Sverdlichenko", email = "blazered@google.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "aiodns>=4.0.4",
+    "aiohttp>=3.14.3",
+    "grpcio>=1.83.1",
+    "protobuf>=7.36.1",
+]
+
+[project.scripts]
+ext-proc-proxy = "ext_proc_proxy:main"
+
+[build-system]
+requires = ["hatchling", "grpcio-tools"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel.hooks.custom]
+# Enables a custom build hook defined in hatch_build.py
