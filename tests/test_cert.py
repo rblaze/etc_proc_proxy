@@ -52,9 +52,7 @@ class TestCertUtils(unittest.TestCase):
             self.assertTrue(os.path.exists(cert_path))
             self.assertTrue(os.path.exists(key_path))
 
-            ctx = create_server_ssl_context(
-                cert_file=cert_path, key_file=key_path
-            )
+            ctx = create_server_ssl_context(cert_file=cert_path, key_file=key_path)
             self.assertIsInstance(ctx, ssl.SSLContext)
 
     def test_get_or_create_server_cert_and_key_self_signed(self):
@@ -78,16 +76,12 @@ class TestCertUtils(unittest.TestCase):
             get_or_create_server_cert_and_key(cert_file=None, key_file=None)
 
         with self.assertRaises(FileNotFoundError):
-            get_or_create_server_cert_and_key(
-                cert_file="/nonexistent/cert.pem", key_file="/nonexistent/key.pem"
-            )
+            get_or_create_server_cert_and_key(cert_file="/nonexistent/cert.pem", key_file="/nonexistent/key.pem")
 
     def test_create_server_ssl_context_missing_files(self):
         """Test error handling in create_server_ssl_context when files do not exist."""
         with self.assertRaises(FileNotFoundError):
-            create_server_ssl_context(
-                cert_file="/nonexistent/cert.pem", key_file="/nonexistent/key.pem"
-            )
+            create_server_ssl_context(cert_file="/nonexistent/cert.pem", key_file="/nonexistent/key.pem")
 
     def test_create_grpc_server_credentials(self):
         """Test creating gRPC server credentials from cert and key files."""
@@ -104,9 +98,7 @@ class TestCertUtils(unittest.TestCase):
     def test_create_grpc_server_credentials_missing_files(self):
         """Test error handling in create_grpc_server_credentials when files do not exist."""
         with self.assertRaises(FileNotFoundError):
-            create_grpc_server_credentials(
-                cert_file="/nonexistent/cert.pem", key_file="/nonexistent/key.pem"
-            )
+            create_grpc_server_credentials(cert_file="/nonexistent/cert.pem", key_file="/nonexistent/key.pem")
 
     def test_generate_self_signed_cert_openssl_not_found(self):
         """Test error message when openssl binary is not found."""

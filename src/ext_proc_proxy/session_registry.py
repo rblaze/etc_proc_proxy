@@ -1,9 +1,8 @@
 """Session registry and IPC data structures for paired ext_proc and HTTP proxy requests."""
 
 import asyncio
-from dataclasses import dataclass, field
 import logging
-from typing import Dict, List, Optional, Tuple, Union
+from dataclasses import dataclass, field
 
 logger = logging.getLogger("ext_proc_proxy.session")
 
@@ -14,7 +13,7 @@ class UpstreamRequestHeaders:
 
     method: str
     path: str
-    headers: List[Tuple[str, str]]
+    headers: list[tuple[str, str]]
     has_body: bool
     scheme: str
 
@@ -32,7 +31,7 @@ class EnvoyResponseHeaders:
     """Response headers received from Envoy forwarded to HTTP proxy."""
 
     status: int
-    headers: List[Tuple[str, str]]
+    headers: list[tuple[str, str]]
     is_empty_body: bool
 
 
@@ -51,12 +50,8 @@ class SessionAbort:
     reason: str
 
 
-RequestToEnvoyItem = Union[
-    UpstreamRequestHeaders, UpstreamRequestBodyChunk, SessionAbort
-]
-ResponseFromEnvoyItem = Union[
-    EnvoyResponseHeaders, EnvoyResponseBodyChunk, SessionAbort
-]
+RequestToEnvoyItem = UpstreamRequestHeaders | UpstreamRequestBodyChunk | SessionAbort
+ResponseFromEnvoyItem = EnvoyResponseHeaders | EnvoyResponseBodyChunk | SessionAbort
 
 
 @dataclass
@@ -64,12 +59,8 @@ class ExtProcSession:
     """State and queues for an active paired ext_proc session."""
 
     request_id: str
-    request_to_envoy_queue: asyncio.Queue[RequestToEnvoyItem] = field(
-        default_factory=asyncio.Queue
-    )
-    response_from_envoy_queue: asyncio.Queue[ResponseFromEnvoyItem] = field(
-        default_factory=asyncio.Queue
-    )
+    request_to_envoy_queue: asyncio.Queue[RequestToEnvoyItem] = field(default_factory=asyncio.Queue)
+    response_from_envoy_queue: asyncio.Queue[ResponseFromEnvoyItem] = field(default_factory=asyncio.Queue)
     is_paired: bool = False
     is_aborted: bool = False
 
@@ -86,18 +77,18 @@ class SessionRegistry:
     """Thread-safe / asyncio registry of active ExtProcSession instances."""
 
     def __init__(self) -> None:
-        self._sessions: Dict[str, ExtProcSession] = {}
+        self._sessions: dict[str, ExtProcSession] = {}
 
     def register(self, session: ExtProcSession) -> None:
         """Register a new ExtProcSession."""
         self._sessions[session.request_id] = session
         logger.debug("Registered session for request ID %s", session.request_id)
 
-    def get(self, request_id: str) -> Optional[ExtProcSession]:
+    def get(self, request_id: str) -> ExtProcSession | None:
         """Look up an active session by request ID."""
         return self._sessions.get(request_id)
 
-    def unregister(self, request_id: str) -> Optional[ExtProcSession]:
+    def unregister(self, request_id: str) -> ExtProcSession | None:
         """Unregister a session when the ext_proc stream completes."""
         session = self._sessions.pop(request_id, None)
         if session:

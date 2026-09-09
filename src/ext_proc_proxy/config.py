@@ -2,7 +2,6 @@
 
 import argparse
 from dataclasses import dataclass
-from typing import List, Optional
 from urllib.parse import urlparse
 
 
@@ -13,8 +12,8 @@ class ProxyConfig:
     # HTTPS Proxy settings
     host: str = "0.0.0.0"
     port: int = 8443
-    cert: Optional[str] = None
-    key: Optional[str] = None
+    cert: str | None = None
+    key: str | None = None
     self_signed: bool = False
     keepalive_timeout: float = 75.0
     upstream_timeout: float = 60.0
@@ -26,7 +25,7 @@ class ProxyConfig:
     ext_proc_target: str = "http://127.0.0.1:8080"
 
 
-def parse_args(args: Optional[List[str]] = None) -> ProxyConfig:
+def parse_args(args: list[str] | None = None) -> ProxyConfig:
     """Parse command line arguments into ProxyConfig."""
     parser = argparse.ArgumentParser(
         description="HTTPS-terminating HTTP/HTTPS proxy and Envoy ext_proc server",

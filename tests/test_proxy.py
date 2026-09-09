@@ -29,24 +29,16 @@ class TestProxyIntegration(unittest.IsolatedAsyncioTestCase):
         cls.upstream_cert, cls.upstream_key = generate_self_signed_cert(hostname="localhost")
 
         # SSL context for the proxy server
-        cls.proxy_server_ssl = create_server_ssl_context(
-            cert_file=cls.proxy_cert, key_file=cls.proxy_key
-        )
+        cls.proxy_server_ssl = create_server_ssl_context(cert_file=cls.proxy_cert, key_file=cls.proxy_key)
 
         # SSL context for the mock upstream server
-        cls.upstream_server_ssl = create_server_ssl_context(
-            cert_file=cls.upstream_cert, key_file=cls.upstream_key
-        )
+        cls.upstream_server_ssl = create_server_ssl_context(cert_file=cls.upstream_cert, key_file=cls.upstream_key)
 
         # Client SSL context that trusts the proxy certificate (for testing proxy HTTPS connection)
-        cls.client_ssl_to_proxy = ssl.create_default_context(
-            ssl.Purpose.SERVER_AUTH, cafile=cls.proxy_cert
-        )
+        cls.client_ssl_to_proxy = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=cls.proxy_cert)
 
         # Upstream client SSL context for proxy to verify upstream cert
-        cls.proxy_to_upstream_ssl = ssl.create_default_context(
-            ssl.Purpose.SERVER_AUTH, cafile=cls.upstream_cert
-        )
+        cls.proxy_to_upstream_ssl = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=cls.upstream_cert)
 
     @classmethod
     def tearDownClass(cls):
@@ -92,9 +84,7 @@ class TestProxyIntegration(unittest.IsolatedAsyncioTestCase):
             key=self.proxy_key,
             upstream_timeout=upstream_timeout,
         )
-        app = create_proxy_app(
-            config=config, upstream_ssl_context=upstream_ssl_context
-        )
+        app = create_proxy_app(config=config, upstream_ssl_context=upstream_ssl_context)
         runner = web.AppRunner(app, keepalive_timeout=75.0)
         await runner.setup()
         self.runners.append(runner)
@@ -111,6 +101,7 @@ class TestProxyIntegration(unittest.IsolatedAsyncioTestCase):
 
     async def test_x_forwarded_proto_http(self):
         """Test proxying to HTTP upstream when X-Forwarded-Proto is http."""
+
         async def mock_handler(request: web.Request):
             body = await request.text()
             return web.json_response(
@@ -153,6 +144,7 @@ class TestProxyIntegration(unittest.IsolatedAsyncioTestCase):
 
     async def test_x_forwarded_proto_https_with_tls_verify(self):
         """Test proxying to HTTPS upstream with TLS verification when X-Forwarded-Proto is https."""
+
         async def mock_handler(request: web.Request):
             return web.Response(text="secure response", status=200)
 
@@ -166,15 +158,14 @@ class TestProxyIntegration(unittest.IsolatedAsyncioTestCase):
                 "Host": f"localhost:{https_port}",
                 "X-Forwarded-Proto": "https",
             }
-            async with session.get(
-                url, headers=headers, ssl=self.client_ssl_to_proxy
-            ) as resp:
+            async with session.get(url, headers=headers, ssl=self.client_ssl_to_proxy) as resp:
                 self.assertEqual(resp.status, 200)
                 text = await resp.text()
                 self.assertEqual(text, "secure response")
 
     async def test_missing_x_forwarded_proto_defaults_to_https(self):
         """Test that missing X-Forwarded-Proto defaults to HTTPS."""
+
         async def mock_handler(request: web.Request):
             return web.Response(text="default https response", status=200)
 
@@ -186,9 +177,7 @@ class TestProxyIntegration(unittest.IsolatedAsyncioTestCase):
             headers = {
                 "Host": f"localhost:{https_port}",
             }
-            async with session.get(
-                url, headers=headers, ssl=self.client_ssl_to_proxy
-            ) as resp:
+            async with session.get(url, headers=headers, ssl=self.client_ssl_to_proxy) as resp:
                 self.assertEqual(resp.status, 200)
                 text = await resp.text()
                 self.assertEqual(text, "default https response")
@@ -203,9 +192,7 @@ class TestProxyIntegration(unittest.IsolatedAsyncioTestCase):
                 "Host": "localhost:8080",
                 "X-Forwarded-Proto": "ftp",
             }
-            async with session.get(
-                url, headers=headers, ssl=self.client_ssl_to_proxy
-            ) as resp:
+            async with session.get(url, headers=headers, ssl=self.client_ssl_to_proxy) as resp:
                 self.assertEqual(resp.status, 400)
                 text = await resp.text()
                 self.assertIn("Invalid X-Forwarded-Proto header value", text)
@@ -236,9 +223,7 @@ class TestProxyIntegration(unittest.IsolatedAsyncioTestCase):
                 "Connection": "X-Custom-Hop",
                 "X-Custom-Hop": "HopVal",
             }
-            async with session.get(
-                url, headers=headers, ssl=self.client_ssl_to_proxy
-            ) as resp:
+            async with session.get(url, headers=headers, ssl=self.client_ssl_to_proxy) as resp:
                 self.assertEqual(resp.status, 200)
                 self.assertEqual(resp.headers.get("X-Upstream-Header"), "UpstreamValue")
 
@@ -247,12 +232,11 @@ class TestProxyIntegration(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("X-Forwarded-Host", received_upstream_headers)
                 self.assertNotIn("X-Forwarded-Proto", received_upstream_headers)
                 self.assertNotIn("X-Custom-Hop", received_upstream_headers)
-                self.assertEqual(
-                    received_upstream_headers.get("X-Valid-Header"), "KeepThis"
-                )
+                self.assertEqual(received_upstream_headers.get("X-Valid-Header"), "KeepThis")
 
     async def test_large_payload_streaming(self):
         """Test streaming large request and response bodies."""
+
         async def echo_handler(request: web.Request):
             resp = web.StreamResponse(status=200)
             await resp.prepare(request)
@@ -310,6 +294,7 @@ class TestProxyIntegration(unittest.IsolatedAsyncioTestCase):
 
     async def test_upstream_tls_verification_failure(self):
         """Test that untrusted upstream TLS certificate triggers 502 Bad Gateway."""
+
         async def mock_handler(request: web.Request):
             return web.Response(text="secret", status=200)
 
@@ -324,9 +309,7 @@ class TestProxyIntegration(unittest.IsolatedAsyncioTestCase):
                 "Host": f"localhost:{https_port}",
                 "X-Forwarded-Proto": "https",
             }
-            async with session.get(
-                url, headers=headers, ssl=self.client_ssl_to_proxy
-            ) as resp:
+            async with session.get(url, headers=headers, ssl=self.client_ssl_to_proxy) as resp:
                 self.assertEqual(resp.status, 502)
                 text = await resp.text()
                 self.assertIn("TLS certificate verification failed", text)
@@ -344,15 +327,14 @@ class TestProxyIntegration(unittest.IsolatedAsyncioTestCase):
                 "Host": f"127.0.0.1:{unused_port}",
                 "X-Forwarded-Proto": "http",
             }
-            async with session.get(
-                url, headers=headers, ssl=self.client_ssl_to_proxy
-            ) as resp:
+            async with session.get(url, headers=headers, ssl=self.client_ssl_to_proxy) as resp:
                 self.assertEqual(resp.status, 502)
                 text = await resp.text()
                 self.assertIn("Failed to connect to upstream", text)
 
     async def test_upstream_timeout(self):
         """Test that upstream timeout returns 504 Gateway Timeout."""
+
         async def slow_handler(request: web.Request):
             await asyncio.sleep(2.0)
             return web.Response(text="slow")
@@ -370,15 +352,14 @@ class TestProxyIntegration(unittest.IsolatedAsyncioTestCase):
                 "Host": f"127.0.0.1:{http_port}",
                 "X-Forwarded-Proto": "http",
             }
-            async with session.get(
-                url, headers=headers, ssl=self.client_ssl_to_proxy
-            ) as resp:
+            async with session.get(url, headers=headers, ssl=self.client_ssl_to_proxy) as resp:
                 self.assertEqual(resp.status, 504)
                 text = await resp.text()
                 self.assertIn("504 Gateway Timeout", text)
 
     async def test_head_request(self):
         """Test HEAD request proxying."""
+
         async def mock_handler(request: web.Request):
             resp = web.Response(text="some body content")
             resp.headers["X-Custom-Head"] = "HeadValue"
@@ -393,9 +374,7 @@ class TestProxyIntegration(unittest.IsolatedAsyncioTestCase):
                 "Host": f"127.0.0.1:{http_port}",
                 "X-Forwarded-Proto": "http",
             }
-            async with session.head(
-                url, headers=headers, ssl=self.client_ssl_to_proxy
-            ) as resp:
+            async with session.head(url, headers=headers, ssl=self.client_ssl_to_proxy) as resp:
                 self.assertEqual(resp.status, 200)
                 self.assertEqual(resp.headers.get("X-Custom-Head"), "HeadValue")
                 body = await resp.read()

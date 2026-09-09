@@ -3,11 +3,11 @@
 import asyncio
 import logging
 import ssl
-from typing import AsyncIterator, Optional
+from collections.abc import AsyncIterator
 
 import aiohttp
-from aiohttp import web
 import multidict
+from aiohttp import web
 
 from ext_proc_proxy.config import ProxyConfig
 from ext_proc_proxy.http_utils import (
@@ -22,6 +22,7 @@ from ext_proc_proxy.session_registry import (
     EnvoyResponseBodyChunk,
     EnvoyResponseHeaders,
     ExtProcSession,
+    RequestToEnvoyItem,
     SessionAbort,
     SessionRegistry,
     UpstreamRequestBodyChunk,
@@ -44,7 +45,7 @@ async def stream_request_payload(request: web.Request) -> AsyncIterator[bytes]:
 
 def _extract_scheme(
     request: web.Request,
-) -> tuple[Optional[str], Optional[web.Response]]:
+) -> tuple[str | None, web.Response | None]:
     """Extract and validate target scheme from X-Forwarded-Proto header."""
     x_proto = request.headers.get("X-Forwarded-Proto")
     if x_proto is not None:
@@ -53,12 +54,41 @@ def _extract_scheme(
             return proto_clean, None
         return None, web.Response(
             status=400,
-            text=(
-                f"Invalid X-Forwarded-Proto header value '{x_proto}'. "
-                "Must be 'http' or 'https'."
-            ),
+            text=(f"Invalid X-Forwarded-Proto header value '{x_proto}'. Must be 'http' or 'https'."),
         )
     return "https", None
+
+
+async def _forward_request_body_to_envoy(
+    request: web.Request,
+    queue: asyncio.Queue[RequestToEnvoyItem],
+) -> None:
+    content_iter = request.content.iter_any()
+    try:
+        prev_chunk = await anext(content_iter)
+    except StopAsyncIteration:
+        await queue.put(UpstreamRequestBodyChunk(data=b"", is_last=True))
+        return
+
+    async for next_chunk in content_iter:
+        await queue.put(UpstreamRequestBodyChunk(data=prev_chunk, is_last=False))
+        prev_chunk = next_chunk
+    await queue.put(UpstreamRequestBodyChunk(data=prev_chunk, is_last=True))
+
+
+async def _forward_envoy_body_to_client(
+    session: ExtProcSession,
+    response: web.StreamResponse,
+) -> None:
+    while True:
+        item = await session.response_from_envoy_queue.get()
+        if isinstance(item, SessionAbort):
+            break
+        if isinstance(item, EnvoyResponseBodyChunk):
+            if item.data:
+                await response.write(item.data)
+            if item.is_last:
+                break
 
 
 async def handle_paired_proxy_request(
@@ -90,22 +120,7 @@ async def handle_paired_proxy_request(
 
         # 2. Stream request body chunks if present
         if request.can_read_body:
-            content_iter = request.content.iter_any()
-            try:
-                prev_chunk = await anext(content_iter)
-            except StopAsyncIteration:
-                await session.request_to_envoy_queue.put(
-                    UpstreamRequestBodyChunk(data=b"", is_last=True)
-                )
-            else:
-                async for next_chunk in content_iter:
-                    await session.request_to_envoy_queue.put(
-                        UpstreamRequestBodyChunk(data=prev_chunk, is_last=False)
-                    )
-                    prev_chunk = next_chunk
-                await session.request_to_envoy_queue.put(
-                    UpstreamRequestBodyChunk(data=prev_chunk, is_last=True)
-                )
+            await _forward_request_body_to_envoy(request, session.request_to_envoy_queue)
 
         # TODO: it seems that this code will not react to the SessionAbort
         # from Envoy until the full request is read from the HTTP connection
@@ -140,28 +155,19 @@ async def handle_paired_proxy_request(
 
         # 4. Stream response body chunks if not a body-less response
         if not first_item.is_empty_body:
-            while True:
-                item = await session.response_from_envoy_queue.get()
-                if isinstance(item, SessionAbort):
-                    break
-                if isinstance(item, EnvoyResponseBodyChunk):
-                    if item.data:
-                        await response.write(item.data)
-                    if item.is_last:
-                        break
+            await _forward_envoy_body_to_client(session, response)
 
         await response.write_eof()
-        return response
 
     except Exception as err:
-        logger.warning(
-            "Error in paired proxy request for %s: %s", session.request_id, err
-        )
+        logger.warning("Error in paired proxy request for %s: %s", session.request_id, err)
         session.abort(f"HTTP proxy error: {err}")
         if not prepared:
             status_code, err_msg = classify_upstream_error(err)
             return web.Response(status=status_code, text=err_msg)
         raise
+    else:
+        return response
 
 
 async def handle_proxy_request(request: web.Request) -> web.StreamResponse:
@@ -169,19 +175,12 @@ async def handle_proxy_request(request: web.Request) -> web.StreamResponse:
     # Check if request has X-Ai-Proxy-Request-Id header for paired session routing
     request_id = request.headers.get(REQUEST_ID_HEADER)
     if request_id is not None:
-        session_registry: Optional[SessionRegistry] = request.app.get(
-            SESSION_REGISTRY_KEY
-        )
-        session = (
-            session_registry.get(request_id) if session_registry is not None else None
-        )
+        session_registry: SessionRegistry | None = request.app.get(SESSION_REGISTRY_KEY)
+        session = session_registry.get(request_id) if session_registry is not None else None
         if session is None:
             return web.Response(
                 status=400,
-                text=(
-                    f"400 Bad Request: Invalid or expired {REQUEST_ID_HEADER} "
-                    f"'{request_id}'"
-                ),
+                text=(f"400 Bad Request: Invalid or expired {REQUEST_ID_HEADER} '{request_id}'"),
             )
         return await handle_paired_proxy_request(request, session)
 
@@ -220,7 +219,7 @@ async def handle_proxy_request(request: web.Request) -> web.StreamResponse:
             allow_redirects=False,
         )
         upstream_resp = await upstream_cm.__aenter__()
-    except Exception as err:
+    except (aiohttp.ClientError, TimeoutError, ssl.SSLError, OSError) as err:
         status_code, err_msg = classify_upstream_error(err)
         logger.warning("Upstream request error for %s: %s", target_url, err)
         return web.Response(
@@ -250,13 +249,11 @@ async def handle_proxy_request(request: web.Request) -> web.StreamResponse:
         await upstream_cm.__aexit__(None, None, None)
 
 
-async def client_session_cleanup_ctx(app: web.Application):
+async def client_session_cleanup_ctx(app: web.Application) -> AsyncIterator[None]:
     """Context manager for managing aiohttp.ClientSession lifecycle."""
     config: ProxyConfig = app[CONFIG_KEY]
     upstream_ssl_ctx = app.get(UPSTREAM_SSL_KEY)
-    session = create_client_session(
-        config=config, upstream_ssl_context=upstream_ssl_ctx
-    )
+    session = create_client_session(config=config, upstream_ssl_context=upstream_ssl_ctx)
     app[CLIENT_SESSION_KEY] = session
 
     yield
@@ -265,9 +262,9 @@ async def client_session_cleanup_ctx(app: web.Application):
 
 
 def create_proxy_app(
-    config: Optional[ProxyConfig] = None,
-    upstream_ssl_context: Optional[ssl.SSLContext] = None,
-    session_registry: Optional[SessionRegistry] = None,
+    config: ProxyConfig | None = None,
+    upstream_ssl_context: ssl.SSLContext | None = None,
+    session_registry: SessionRegistry | None = None,
 ) -> web.Application:
     """Create and configure the proxy web.Application."""
     if config is None:

@@ -60,17 +60,19 @@ class TestHttpUtils(unittest.IsolatedAsyncioTestCase):
 
     def test_filter_request_headers_cimultidict(self):
         """Test filtering request headers from a CIMultiDictProxy."""
-        md = multidict.CIMultiDict([
-            ("Host", "example.com"),
-            ("Accept", "text/html"),
-            ("Connection", "upgrade, X-Hop"),
-            ("Upgrade", "websocket"),
-            ("X-Hop", "hopval"),
-            ("X-Forwarded-For", "127.0.0.1"),
-            ("X-Forwarded-Host", "example.org"),
-            ("X-Forwarded-Proto", "https"),
-            ("X-Ai-Proxy-Request-Id", "uuid-789"),
-        ])
+        md = multidict.CIMultiDict(
+            [
+                ("Host", "example.com"),
+                ("Accept", "text/html"),
+                ("Connection", "upgrade, X-Hop"),
+                ("Upgrade", "websocket"),
+                ("X-Hop", "hopval"),
+                ("X-Forwarded-For", "127.0.0.1"),
+                ("X-Forwarded-Host", "example.org"),
+                ("X-Forwarded-Proto", "https"),
+                ("X-Ai-Proxy-Request-Id", "uuid-789"),
+            ]
+        )
         proxy = multidict.CIMultiDictProxy(md)
 
         filtered = filter_request_headers(proxy)
@@ -110,15 +112,17 @@ class TestHttpUtils(unittest.IsolatedAsyncioTestCase):
 
     def test_filter_response_headers_cimultidict(self):
         """Test filtering response headers from a CIMultiDict."""
-        md = multidict.CIMultiDict([
-            ("Server", "aiohttp"),
-            ("Set-Cookie", "c1=v1"),
-            ("Set-Cookie", "c2=v2"),
-            ("Connection", "X-Hop1, X-Hop2"),
-            ("X-Hop1", "val1"),
-            ("X-Hop2", "val2"),
-            ("Proxy-Authenticate", "Basic"),
-        ])
+        md = multidict.CIMultiDict(
+            [
+                ("Server", "aiohttp"),
+                ("Set-Cookie", "c1=v1"),
+                ("Set-Cookie", "c2=v2"),
+                ("Connection", "X-Hop1, X-Hop2"),
+                ("X-Hop1", "val1"),
+                ("X-Hop2", "val2"),
+                ("Proxy-Authenticate", "Basic"),
+            ]
+        )
         proxy = multidict.CIMultiDictProxy(md)
 
         filtered = filter_response_headers(proxy)

@@ -1,21 +1,21 @@
 """Envoy External Processing (ext_proc) gRPC server implementation using grpc.aio."""
 
 import asyncio
-from dataclasses import dataclass
 import logging
 import ssl
-from typing import AsyncIterator, Dict, Iterable, List, Optional, Tuple, Union
-from urllib.parse import urlparse
 import uuid
+from collections.abc import AsyncIterator, Iterable
+from dataclasses import dataclass
+from urllib.parse import urlparse
 
 import aiohttp
 import grpc
 import multidict
-
 from envoy.service.ext_proc.v3 import (
     external_processor_pb2,
     external_processor_pb2_grpc,
 )
+
 from ext_proc_proxy.config import ProxyConfig
 from ext_proc_proxy.http_utils import (
     REQUEST_ID_HEADER,
@@ -51,7 +51,7 @@ class UpstreamHeaders:
     """Upstream HTTP response status and filtered headers."""
 
     status: int
-    headers: List[Tuple[str, str]]
+    headers: list[tuple[str, str]]
     is_empty_body: bool
 
 
@@ -71,16 +71,16 @@ class UpstreamError:
     message: str
 
 
-UpstreamResponseItem = Union[UpstreamHeaders, UpstreamBodyChunk, UpstreamError]
+UpstreamResponseItem = UpstreamHeaders | UpstreamBodyChunk | UpstreamError
 
 
 def _build_header_mutation(
-    headers: List[Tuple[str, str]],
-    status_code: Optional[int] = None,
-    method: Optional[str] = None,
-    path: Optional[str] = None,
-    scheme: Optional[str] = None,
-    original_headers: Optional[Iterable[str]] = None,
+    headers: list[tuple[str, str]],
+    status_code: int | None = None,
+    method: str | None = None,
+    path: str | None = None,
+    scheme: str | None = None,
+    original_headers: Iterable[str] | None = None,
 ) -> external_processor_pb2.HeaderMutation:
     """Build a HeaderMutation protobuf message from key-value pairs."""
     mutation = external_processor_pb2.HeaderMutation()
@@ -116,9 +116,7 @@ def _build_header_mutation(
         to_remove = {
             k.lower()
             for k in original_headers
-            if not k.startswith(":")
-            and k.lower() != "x-forwarded-proto"
-            and k.lower() not in new_keys
+            if not k.startswith(":") and k.lower() != "x-forwarded-proto" and k.lower() not in new_keys
         }
         for rh in sorted(to_remove):
             mutation.remove_headers.append(rh)
@@ -132,15 +130,13 @@ class ExternalProcessorService(external_processor_pb2_grpc.ExternalProcessorServ
     def __init__(
         self,
         config: ProxyConfig,
-        upstream_ssl_context: Optional[ssl.SSLContext] = None,
-        session_registry: Optional[SessionRegistry] = None,
-    ):
+        upstream_ssl_context: ssl.SSLContext | None = None,
+        session_registry: SessionRegistry | None = None,
+    ) -> None:
         self.config = config
-        self._session: Optional[aiohttp.ClientSession] = None
+        self._session: aiohttp.ClientSession | None = None
         self._upstream_ssl_context = upstream_ssl_context
-        self.session_registry = (
-            session_registry if session_registry is not None else SessionRegistry()
-        )
+        self.session_registry = session_registry if session_registry is not None else SessionRegistry()
         self.target_url_parsed = urlparse(config.ext_proc_target)
 
     async def get_session(self) -> aiohttp.ClientSession:
@@ -152,7 +148,7 @@ class ExternalProcessorService(external_processor_pb2_grpc.ExternalProcessorServ
             )
         return self._session
 
-    async def close(self):
+    async def close(self) -> None:
         """Close internal session if initialized."""
         if self._session and not self._session.closed:
             await self._session.close()
@@ -163,7 +159,7 @@ class ExternalProcessorService(external_processor_pb2_grpc.ExternalProcessorServ
         method: str,
         target_url: str,
         headers: multidict.CIMultiDict,
-        body_queue: Optional[asyncio.Queue[RequestBodyChunk]],
+        body_queue: asyncio.Queue[RequestBodyChunk] | None,
         resp_queue: asyncio.Queue[UpstreamResponseItem],
     ) -> None:
         """Execute upstream request and stream body/response via queues."""
@@ -171,7 +167,7 @@ class ExternalProcessorService(external_processor_pb2_grpc.ExternalProcessorServ
             body_data = None
             if body_queue is not None:
 
-                async def body_stream_generator():
+                async def body_stream_generator() -> AsyncIterator[bytes]:
                     while True:
                         chunk_item = await body_queue.get()
                         if chunk_item.data:
@@ -210,88 +206,54 @@ class ExternalProcessorService(external_processor_pb2_grpc.ExternalProcessorServ
                         await resp_queue.put(UpstreamBodyChunk(data=b"", is_last=True))
                     else:
                         async for next_chunk in content_iter:
-                            await resp_queue.put(
-                                UpstreamBodyChunk(data=prev_chunk, is_last=False)
-                            )
+                            await resp_queue.put(UpstreamBodyChunk(data=prev_chunk, is_last=False))
                             prev_chunk = next_chunk
-                        await resp_queue.put(
-                            UpstreamBodyChunk(data=prev_chunk, is_last=True)
-                        )
+                        await resp_queue.put(UpstreamBodyChunk(data=prev_chunk, is_last=True))
 
-        except Exception as err:
+        except (aiohttp.ClientError, TimeoutError, ssl.SSLError, OSError) as err:
             status_code, err_msg = classify_upstream_error(err)
             logger.warning("Upstream request error for %s: %s", target_url, err)
             await resp_queue.put(UpstreamError(status=status_code, message=err_msg))
 
-    async def _handle_paired_flow(
+    async def _stream_paired_request_body_to_envoy(
         self,
-        proxy_first_item: UpstreamRequestHeaders,
         ext_proc_session: ExtProcSession,
-        request_iterator: AsyncIterator[external_processor_pb2.ProcessingRequest],
-        resp_queue: asyncio.Queue[UpstreamResponseItem],
-        original_request_headers: Optional[Iterable[str]] = None,
     ) -> AsyncIterator[external_processor_pb2.ProcessingResponse]:
-        """Handle PATH A: Paired mode when Upstream Service called HTTP Proxy."""
-        # 1. Mutate request headers sent forward to Envoy Target
-        header_mutation = _build_header_mutation(
-            headers=proxy_first_item.headers,
-            method=proxy_first_item.method,
-            path=proxy_first_item.path,
-            scheme=proxy_first_item.scheme,
-            original_headers=original_request_headers,
-        )
-        common_resp = external_processor_pb2.CommonResponse(
-            header_mutation=header_mutation,
-            status=external_processor_pb2.CommonResponse.ResponseStatus.CONTINUE,
-            clear_route_cache=True,
-        )
-        headers_resp = external_processor_pb2.HeadersResponse(response=common_resp)
-        yield external_processor_pb2.ProcessingResponse(request_headers=headers_resp)
-
-        # 2. If proxy request has body, stream request body chunks to Envoy
-        if proxy_first_item.has_body:
-            has_yielded_body = False
-            while True:
-                body_item = await ext_proc_session.request_to_envoy_queue.get()
-                if isinstance(body_item, SessionAbort):
+        has_yielded_body = False
+        while True:
+            body_item = await ext_proc_session.request_to_envoy_queue.get()
+            if isinstance(body_item, SessionAbort):
+                break
+            if isinstance(body_item, UpstreamRequestBodyChunk):
+                if body_item.data or (body_item.is_last and not has_yielded_body):
+                    streamed_body = external_processor_pb2.StreamedBodyResponse(
+                        body=body_item.data,
+                        end_of_stream=body_item.is_last,
+                    )
+                    body_mut = external_processor_pb2.BodyMutation(streamed_response=streamed_body)
+                    body_common = external_processor_pb2.CommonResponse(
+                        body_mutation=body_mut,
+                        status=external_processor_pb2.CommonResponse.ResponseStatus.CONTINUE,
+                    )
+                    has_yielded_body = True
+                    yield external_processor_pb2.ProcessingResponse(
+                        request_body=external_processor_pb2.BodyResponse(response=body_common)
+                    )
+                if body_item.is_last:
                     break
-                if isinstance(body_item, UpstreamRequestBodyChunk):
-                    if body_item.data or (body_item.is_last and not has_yielded_body):
-                        streamed_body = external_processor_pb2.StreamedBodyResponse(
-                            body=body_item.data,
-                            end_of_stream=body_item.is_last,
-                        )
-                        body_mut = external_processor_pb2.BodyMutation(
-                            streamed_response=streamed_body
-                        )
-                        body_common = external_processor_pb2.CommonResponse(
-                            body_mutation=body_mut,
-                            status=external_processor_pb2.CommonResponse.ResponseStatus.CONTINUE,
-                        )
-                        has_yielded_body = True
-                        yield external_processor_pb2.ProcessingResponse(
-                            request_body=external_processor_pb2.BodyResponse(
-                                response=body_common
-                            )
-                        )
-                    if body_item.is_last:
-                        break
 
-        # TODO: similarly to HTTP proxy, this prevents the handler from reading early
-        # response, one that happens before full request body is sent to the target.
-        #
-        # 3. Read response from Target via Envoy (response_headers / response_body)
-        target_response_headers: List[str] = []
+    async def _read_target_response_from_envoy(
+        self,
+        request_iterator: AsyncIterator[external_processor_pb2.ProcessingRequest],
+        ext_proc_session: ExtProcSession,
+    ) -> list[str]:
+        target_response_headers: list[str] = []
         async for req in request_iterator:
             if req.HasField("response_headers"):
-                raw_resp_headers: Dict[str, str] = {}
+                raw_resp_headers: dict[str, str] = {}
                 for h in req.response_headers.headers.headers:
-                    raw_resp_headers[h.key] = h.value or (
-                        h.raw_value.decode("utf-8", "ignore") if h.raw_value else ""
-                    )
-                target_response_headers = [
-                    h.key for h in req.response_headers.headers.headers
-                ]
+                    raw_resp_headers[h.key] = h.value or (h.raw_value.decode("utf-8", "ignore") if h.raw_value else "")
+                target_response_headers = [h.key for h in req.response_headers.headers.headers]
 
                 status_str = raw_resp_headers.get(":status", "200")
                 try:
@@ -324,13 +286,17 @@ class ExternalProcessorService(external_processor_pb2_grpc.ExternalProcessorServ
                 )
                 if is_last_chunk:
                     break
+        return target_response_headers
 
-        # 4. Stream Upstream Service's final response back to Envoy via HeaderMutation & BodyMutation
+    async def _stream_paired_final_response_to_envoy(
+        self,
+        resp_queue: asyncio.Queue[UpstreamResponseItem],
+        target_response_headers: list[str],
+    ) -> AsyncIterator[external_processor_pb2.ProcessingResponse]:
         while True:
             item = await resp_queue.get()
 
             if isinstance(item, UpstreamError):
-                # Upstream error after pairing
                 err_bytes = item.message.encode("utf-8")
                 hdr_mut = _build_header_mutation(
                     [],
@@ -341,9 +307,7 @@ class ExternalProcessorService(external_processor_pb2_grpc.ExternalProcessorServ
                     body=err_bytes,
                     end_of_stream=True,
                 )
-                body_mut = external_processor_pb2.BodyMutation(
-                    streamed_response=streamed_body
-                )
+                body_mut = external_processor_pb2.BodyMutation(streamed_response=streamed_body)
                 cr = external_processor_pb2.CommonResponse(
                     header_mutation=hdr_mut,
                     body_mutation=body_mut,
@@ -371,9 +335,7 @@ class ExternalProcessorService(external_processor_pb2_grpc.ExternalProcessorServ
                     body=item.data,
                     end_of_stream=item.is_last,
                 )
-                body_mut = external_processor_pb2.BodyMutation(
-                    streamed_response=streamed_body
-                )
+                body_mut = external_processor_pb2.BodyMutation(streamed_response=streamed_body)
                 cr = external_processor_pb2.CommonResponse(body_mutation=body_mut)
                 yield external_processor_pb2.ProcessingResponse(
                     response_body=external_processor_pb2.BodyResponse(response=cr)
@@ -381,13 +343,53 @@ class ExternalProcessorService(external_processor_pb2_grpc.ExternalProcessorServ
                 if item.is_last:
                     break
 
+    async def _handle_paired_flow(
+        self,
+        proxy_first_item: UpstreamRequestHeaders,
+        ext_proc_session: ExtProcSession,
+        request_iterator: AsyncIterator[external_processor_pb2.ProcessingRequest],
+        resp_queue: asyncio.Queue[UpstreamResponseItem],
+        original_request_headers: Iterable[str] | None = None,
+    ) -> AsyncIterator[external_processor_pb2.ProcessingResponse]:
+        """Handle PATH A: Paired mode when Upstream Service called HTTP Proxy."""
+        # 1. Mutate request headers sent forward to Envoy Target
+        header_mutation = _build_header_mutation(
+            headers=proxy_first_item.headers,
+            method=proxy_first_item.method,
+            path=proxy_first_item.path,
+            scheme=proxy_first_item.scheme,
+            original_headers=original_request_headers,
+        )
+        common_resp = external_processor_pb2.CommonResponse(
+            header_mutation=header_mutation,
+            status=external_processor_pb2.CommonResponse.ResponseStatus.CONTINUE,
+            clear_route_cache=True,
+        )
+        headers_resp = external_processor_pb2.HeadersResponse(response=common_resp)
+        yield external_processor_pb2.ProcessingResponse(request_headers=headers_resp)
+
+        # 2. If proxy request has body, stream request body chunks to Envoy
+        if proxy_first_item.has_body:
+            async for resp in self._stream_paired_request_body_to_envoy(ext_proc_session):
+                yield resp
+
+        # TODO: similarly to HTTP proxy, this prevents the handler from reading early
+        # response, one that happens before full request body is sent to the target.
+        #
+        # 3. Read response from Target via Envoy (response_headers / response_body)
+        target_response_headers = await self._read_target_response_from_envoy(request_iterator, ext_proc_session)
+
+        # 4. Stream Upstream Service's final response back to Envoy via HeaderMutation & BodyMutation
+        async for resp in self._stream_paired_final_response_to_envoy(resp_queue, target_response_headers):
+            yield resp
+
     async def _handle_unpaired_flow(
         self,
         first_item: UpstreamResponseItem,
         resp_queue: asyncio.Queue[UpstreamResponseItem],
     ) -> AsyncIterator[external_processor_pb2.ProcessingResponse]:
         """Handle PATH B: Unpaired / Direct Short-Circuit or Error."""
-        current_item: Optional[UpstreamResponseItem] = first_item
+        current_item: UpstreamResponseItem | None = first_item
 
         while True:
             item = current_item if current_item is not None else await resp_queue.get()
@@ -403,16 +405,12 @@ class ExternalProcessorService(external_processor_pb2_grpc.ExternalProcessorServ
                 h_ct.key = "content-type"
                 h_ct.raw_value = b"text/plain"
                 sir.headers_response.end_of_stream = False
-                yield external_processor_pb2.ProcessingResponse(
-                    streamed_immediate_response=sir
-                )
+                yield external_processor_pb2.ProcessingResponse(streamed_immediate_response=sir)
 
                 sir_body = external_processor_pb2.StreamedImmediateResponse()
                 sir_body.body_response.body = err_bytes
                 sir_body.body_response.end_of_stream = True
-                yield external_processor_pb2.ProcessingResponse(
-                    streamed_immediate_response=sir_body
-                )
+                yield external_processor_pb2.ProcessingResponse(streamed_immediate_response=sir_body)
                 break
 
             elif isinstance(item, UpstreamHeaders):
@@ -427,9 +425,7 @@ class ExternalProcessorService(external_processor_pb2_grpc.ExternalProcessorServ
                     hv.raw_value = v.encode("utf-8") if isinstance(v, str) else bytes(v)
 
                 sir.headers_response.end_of_stream = item.is_empty_body
-                yield external_processor_pb2.ProcessingResponse(
-                    streamed_immediate_response=sir
-                )
+                yield external_processor_pb2.ProcessingResponse(streamed_immediate_response=sir)
                 if item.is_empty_body:
                     break
 
@@ -437,11 +433,60 @@ class ExternalProcessorService(external_processor_pb2_grpc.ExternalProcessorServ
                 sir = external_processor_pb2.StreamedImmediateResponse()
                 sir.body_response.body = item.data
                 sir.body_response.end_of_stream = item.is_last
-                yield external_processor_pb2.ProcessingResponse(
-                    streamed_immediate_response=sir
-                )
+                yield external_processor_pb2.ProcessingResponse(streamed_immediate_response=sir)
                 if item.is_last:
                     break
+
+    async def _forward_request_body_from_envoy(
+        self,
+        request_iterator: AsyncIterator[external_processor_pb2.ProcessingRequest],
+        body_queue: asyncio.Queue[RequestBodyChunk],
+    ) -> None:
+        async for req in request_iterator:
+            if req.HasField("request_body"):
+                chunk = req.request_body.body
+                is_last = req.request_body.end_of_stream
+                await body_queue.put(RequestBodyChunk(data=chunk, is_last=is_last))
+                if is_last:
+                    break
+
+    async def _dispatch_flow(
+        self,
+        ext_proc_session: ExtProcSession,
+        resp_queue: asyncio.Queue[UpstreamResponseItem],
+        request_iterator: AsyncIterator[external_processor_pb2.ProcessingRequest],
+        original_request_headers: list[str],
+    ) -> AsyncIterator[external_processor_pb2.ProcessingResponse]:
+        get_proxy_req = asyncio.create_task(ext_proc_session.request_to_envoy_queue.get())
+        get_upstream_resp = asyncio.create_task(resp_queue.get())
+
+        done, _ = await asyncio.wait(
+            [get_proxy_req, get_upstream_resp],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
+        if get_proxy_req in done:
+            get_upstream_resp.cancel()
+            proxy_first_item = get_proxy_req.result()
+
+            if isinstance(proxy_first_item, UpstreamRequestHeaders):
+                async for resp in self._handle_paired_flow(
+                    proxy_first_item=proxy_first_item,
+                    ext_proc_session=ext_proc_session,
+                    request_iterator=request_iterator,
+                    resp_queue=resp_queue,
+                    original_request_headers=original_request_headers,
+                ):
+                    yield resp
+        else:
+            get_proxy_req.cancel()
+            first_item = get_upstream_resp.result()
+
+            async for resp in self._handle_unpaired_flow(
+                first_item=first_item,
+                resp_queue=resp_queue,
+            ):
+                yield resp
 
     async def Process(
         self,
@@ -450,9 +495,9 @@ class ExternalProcessorService(external_processor_pb2_grpc.ExternalProcessorServ
     ) -> AsyncIterator[external_processor_pb2.ProcessingResponse]:
         """Handle bidirectional ext_proc stream from Envoy."""
         session = await self.get_session()
-        upstream_task: Optional[asyncio.Task] = None
-        ext_proc_session: Optional[ExtProcSession] = None
-        request_id: Optional[str] = None
+        upstream_task: asyncio.Task | None = None
+        ext_proc_session: ExtProcSession | None = None
+        request_id: str | None = None
 
         try:
             # Read first request containing headers
@@ -472,14 +517,10 @@ class ExternalProcessorService(external_processor_pb2_grpc.ExternalProcessorServ
                 return
 
             # Extract headers, method, path
-            raw_headers: Dict[str, str] = {}
+            raw_headers: dict[str, str] = {}
             for h in first_request.request_headers.headers.headers:
-                raw_headers[h.key] = h.value or (
-                    h.raw_value.decode("utf-8", "ignore") if h.raw_value else ""
-                )
-            original_request_headers = [
-                h.key for h in first_request.request_headers.headers.headers
-            ]
+                raw_headers[h.key] = h.value or (h.raw_value.decode("utf-8", "ignore") if h.raw_value else "")
+            original_request_headers = [h.key for h in first_request.request_headers.headers.headers]
 
             method = raw_headers.get(":method", "GET").upper()
             path = raw_headers.get(":path", "/")
@@ -503,9 +544,7 @@ class ExternalProcessorService(external_processor_pb2_grpc.ExternalProcessorServ
             outgoing_headers["x-litellm-num-retries"] = "0"
 
             has_request_body = not first_request.request_headers.end_of_stream
-            body_queue: Optional[asyncio.Queue[RequestBodyChunk]] = (
-                asyncio.Queue() if has_request_body else None
-            )
+            body_queue: asyncio.Queue[RequestBodyChunk] | None = asyncio.Queue() if has_request_body else None
             resp_queue: asyncio.Queue[UpstreamResponseItem] = asyncio.Queue()
 
             # Start upstream task to send initial request to Upstream Service
@@ -520,60 +559,21 @@ class ExternalProcessorService(external_processor_pb2_grpc.ExternalProcessorServ
                 )
             )
 
-            if has_request_body:
-                # Stream incoming body chunks from Envoy to Upstream Service (FULL_DUPLEX_STREAMED mode)
-                async for req in request_iterator:
-                    if req.HasField("request_body"):
-                        chunk = req.request_body.body
-                        is_last = req.request_body.end_of_stream
-                        await body_queue.put(
-                            RequestBodyChunk(data=chunk, is_last=is_last)
-                        )
+            if has_request_body and body_queue is not None:
+                await self._forward_request_body_from_envoy(request_iterator, body_queue)
 
-                        if is_last:
-                            break
-
-            # Wait for either paired HTTP proxy request OR direct Upstream Service response
-            get_proxy_req = asyncio.create_task(
-                ext_proc_session.request_to_envoy_queue.get()
-            )
-            get_upstream_resp = asyncio.create_task(resp_queue.get())
-
-            done, _ = await asyncio.wait(
-                [get_proxy_req, get_upstream_resp],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-
-            # -------------------------------------------------------------
-            # Dispatch to PATH A (Paired Mode) or PATH B (Unpaired Mode)
-            # -------------------------------------------------------------
-            if get_proxy_req in done:
-                get_upstream_resp.cancel()
-                proxy_first_item = get_proxy_req.result()
-
-                if isinstance(proxy_first_item, UpstreamRequestHeaders):
-                    async for resp in self._handle_paired_flow(
-                        proxy_first_item=proxy_first_item,
-                        ext_proc_session=ext_proc_session,
-                        request_iterator=request_iterator,
-                        resp_queue=resp_queue,
-                        original_request_headers=original_request_headers,
-                    ):
-                        yield resp
-            else:
-                get_proxy_req.cancel()
-                first_item = get_upstream_resp.result()
-
-                async for resp in self._handle_unpaired_flow(
-                    first_item=first_item,
-                    resp_queue=resp_queue,
-                ):
-                    yield resp
+            async for resp in self._dispatch_flow(
+                ext_proc_session=ext_proc_session,
+                resp_queue=resp_queue,
+                request_iterator=request_iterator,
+                original_request_headers=original_request_headers,
+            ):
+                yield resp
 
             await upstream_task
 
-        except Exception as err:
-            logger.exception("Error in ext_proc Process: %s", err)
+        except Exception:
+            logger.exception("Error in ext_proc Process")
             raise
         finally:
             if ext_proc_session is not None and request_id is not None:
@@ -584,15 +584,15 @@ class ExternalProcessorService(external_processor_pb2_grpc.ExternalProcessorServ
                 upstream_task.cancel()
                 try:
                     await upstream_task
-                except (asyncio.CancelledError, Exception):
+                except asyncio.CancelledError:
                     pass
 
 
 def create_ext_proc_server(
     config: ProxyConfig,
     server_credentials: grpc.ServerCredentials,
-    upstream_ssl_context: Optional[ssl.SSLContext] = None,
-    session_registry: Optional[SessionRegistry] = None,
+    upstream_ssl_context: ssl.SSLContext | None = None,
+    session_registry: SessionRegistry | None = None,
 ) -> grpc.aio.Server:
     """Create and configure the TLS-secured gRPC ext_proc server."""
     server = grpc.aio.server()

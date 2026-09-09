@@ -4,9 +4,7 @@ import os
 import sys
 
 # Ensure generated protobuf stubs are importable
-GEN_DIR = os.path.normpath(
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "protogen")
-)
+GEN_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "protogen"))
 if os.path.exists(GEN_DIR) and GEN_DIR not in sys.path:
     sys.path.insert(0, GEN_DIR)
 
@@ -72,7 +70,7 @@ async def run_servers(config: ProxyConfig) -> None:
         logger.info("Shutting down servers...")
 
 
-def main():
+def main() -> None:
     """Main entry point function."""
     config = parse_args()
     try:

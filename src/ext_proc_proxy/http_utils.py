@@ -2,16 +2,16 @@
 
 import asyncio
 import ssl
-from typing import Mapping, Optional, Set, Tuple, Union
+from collections.abc import Mapping
 
 import aiohttp
-from aiohttp import ClientTimeout
 import multidict
+from aiohttp import ClientTimeout
 
 from ext_proc_proxy.config import ProxyConfig
 
 # Standard Hop-by-Hop headers defined in RFC 2616 / RFC 7230 / RFC 9110
-HOP_BY_HOP_HEADERS: Set[str] = {
+HOP_BY_HOP_HEADERS: set[str] = {
     "connection",
     "keep-alive",
     "proxy-authenticate",
@@ -26,7 +26,7 @@ HOP_BY_HOP_HEADERS: Set[str] = {
 REQUEST_ID_HEADER: str = "x-ai-proxy-request-id"
 
 # Headers that must not be propagated per proxy requirements
-EXCLUDED_REQUEST_HEADERS: Set[str] = {
+EXCLUDED_REQUEST_HEADERS: set[str] = {
     "x-forwarded-for",
     "x-forwarded-host",
     "x-forwarded-proto",
@@ -34,7 +34,7 @@ EXCLUDED_REQUEST_HEADERS: Set[str] = {
 }
 
 
-def _get_connection_tokens(headers: Mapping[str, str]) -> Set[str]:
+def _get_connection_tokens(headers: Mapping[str, str]) -> set[str]:
     """Extract token names specified in the Connection header."""
     connection_val = ""
     if isinstance(headers, (multidict.CIMultiDictProxy, multidict.CIMultiDict)):
@@ -48,15 +48,11 @@ def _get_connection_tokens(headers: Mapping[str, str]) -> Set[str]:
     if not connection_val:
         return set()
 
-    return {
-        token.strip().lower() for token in connection_val.split(",") if token.strip()
-    }
+    return {token.strip().lower() for token in connection_val.split(",") if token.strip()}
 
 
 def filter_request_headers(
-    headers: Union[
-        Mapping[str, str], multidict.CIMultiDictProxy, multidict.CIMultiDict
-    ],
+    headers: Mapping[str, str] | multidict.CIMultiDictProxy | multidict.CIMultiDict,
 ) -> multidict.CIMultiDict:
     """Filter pseudo-headers, hop-by-hop headers, and excluded headers from incoming request headers."""
     filtered = multidict.CIMultiDict()
@@ -71,9 +67,7 @@ def filter_request_headers(
 
 
 def filter_response_headers(
-    headers: Union[
-        Mapping[str, str], multidict.CIMultiDictProxy, multidict.CIMultiDict
-    ],
+    headers: Mapping[str, str] | multidict.CIMultiDictProxy | multidict.CIMultiDict,
 ) -> multidict.CIMultiDict:
     """Filter pseudo-headers and hop-by-hop headers from upstream response headers."""
     filtered = multidict.CIMultiDict()
@@ -92,12 +86,9 @@ def is_bodyless_response(method: str, status: int) -> bool:
     return method.upper() == "HEAD" or status in (204, 304)
 
 
-def classify_upstream_error(err: Exception) -> Tuple[int, str]:
+def classify_upstream_error(err: Exception) -> tuple[int, str]:
     """Map upstream exception to HTTP status code and descriptive error message."""
-    try:
-        err_desc = str(err)
-    except Exception:
-        err_desc = repr(err)
+    err_desc = str(err) or repr(err)
 
     if isinstance(err, (ssl.SSLCertVerificationError, aiohttp.ClientSSLError)):
         return (
@@ -128,7 +119,7 @@ def classify_upstream_error(err: Exception) -> Tuple[int, str]:
 
 def create_client_session(
     config: ProxyConfig,
-    upstream_ssl_context: Optional[ssl.SSLContext] = None,
+    upstream_ssl_context: ssl.SSLContext | None = None,
 ) -> aiohttp.ClientSession:
     """Create and configure an aiohttp.ClientSession for upstream proxy requests."""
     if upstream_ssl_context is None:

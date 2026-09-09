@@ -36,12 +36,8 @@ class TestPairedProxy(unittest.IsolatedAsyncioTestCase):
         with open(cls.cert_file, "rb") as f:
             cls.cert_bytes = f.read()
 
-        cls.server_ssl_ctx = create_server_ssl_context(
-            cert_file=cls.cert_file, key_file=cls.key_file
-        )
-        cls.client_ssl_ctx = ssl.create_default_context(
-            ssl.Purpose.SERVER_AUTH, cafile=cls.cert_file
-        )
+        cls.server_ssl_ctx = create_server_ssl_context(cert_file=cls.cert_file, key_file=cls.key_file)
+        cls.client_ssl_ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=cls.cert_file)
 
     @classmethod
     def tearDownClass(cls):
@@ -62,9 +58,7 @@ class TestPairedProxy(unittest.IsolatedAsyncioTestCase):
         for runner in reversed(self.http_runners):
             await runner.cleanup()
 
-    async def _start_http_server(
-        self, handler, ssl_context: Optional[ssl.SSLContext] = None
-    ) -> int:
+    async def _start_http_server(self, handler, ssl_context: Optional[ssl.SSLContext] = None) -> int:
         """Start an aiohttp HTTP/HTTPS server and return its port."""
         app = web.Application()
         app.router.add_route("*", "/{path_info:.*}", handler)
@@ -160,13 +154,9 @@ class TestPairedProxy(unittest.IsolatedAsyncioTestCase):
                     REQUEST_ID_HEADER: req_id,
                     "X-Transformed-Header": "AiEnriched",
                 }
-                async with client.post(
-                    proxy_url, headers=headers, data="transformed request body"
-                ) as proxy_resp:
+                async with client.post(proxy_url, headers=headers, data="transformed request body") as proxy_resp:
                     target_received_by_upstream["status"] = proxy_resp.status
-                    target_received_by_upstream["custom_hdr"] = proxy_resp.headers.get(
-                        "X-Target-Custom"
-                    )
+                    target_received_by_upstream["custom_hdr"] = proxy_resp.headers.get("X-Target-Custom")
                     target_received_by_upstream["body"] = await proxy_resp.text()
 
             # Final response from Upstream Service returned to gRPC server
@@ -219,16 +209,12 @@ class TestPairedProxy(unittest.IsolatedAsyncioTestCase):
             # gRPC server sends ProcessingResponse with HeaderMutation to Envoy!
             proxy_req_headers = await call.read()
             self.assertTrue(proxy_req_headers.HasField("request_headers"))
-            hdr_mut = (
-                proxy_req_headers.request_headers.response.header_mutation.set_headers
-            )
+            hdr_mut = proxy_req_headers.request_headers.response.header_mutation.set_headers
             mutated_headers = {
                 h.header.key: (h.header.raw_value.decode("utf-8") if h.header.raw_value else h.header.value)
                 for h in hdr_mut
             }
-            self.assertEqual(
-                mutated_headers.get("x-transformed-header"), "AiEnriched"
-            )
+            self.assertEqual(mutated_headers.get("x-transformed-header"), "AiEnriched")
             # Ensure internal request ID was stripped from outgoing request to Target
             self.assertNotIn(REQUEST_ID_HEADER, mutated_headers)
             # Ensure dropped header is in remove_headers
@@ -268,17 +254,13 @@ class TestPairedProxy(unittest.IsolatedAsyncioTestCase):
             # 7. gRPC server sends final response (HeaderMutation on response_headers & BodyMutation on response_body)
             final_resp_hdrs = await call.read()
             self.assertTrue(final_resp_hdrs.HasField("response_headers"))
-            final_hdr_mut = (
-                final_resp_hdrs.response_headers.response.header_mutation.set_headers
-            )
+            final_hdr_mut = final_resp_hdrs.response_headers.response.header_mutation.set_headers
             final_headers_dict = {
                 h.header.key: (h.header.raw_value.decode("utf-8") if h.header.raw_value else h.header.value)
                 for h in final_hdr_mut
             }
             self.assertEqual(final_headers_dict.get(":status"), "200")
-            self.assertEqual(
-                final_headers_dict.get("x-final-service-header"), "FinalVal"
-            )
+            self.assertEqual(final_headers_dict.get("x-final-service-header"), "FinalVal")
             self.assertIn(
                 "x-target-custom",
                 list(final_resp_hdrs.response_headers.response.header_mutation.remove_headers),
@@ -296,9 +278,7 @@ class TestPairedProxy(unittest.IsolatedAsyncioTestCase):
 
             # Verify Upstream Service received all intermediate data
             self.assertIn("request_id", received_by_upstream_service)
-            self.assertEqual(
-                received_by_upstream_service["body"], "initial prompt payload"
-            )
+            self.assertEqual(received_by_upstream_service["body"], "initial prompt payload")
             self.assertEqual(target_received_by_upstream["status"], 200)
             self.assertEqual(
                 target_received_by_upstream["custom_hdr"],
@@ -327,6 +307,7 @@ class TestPairedProxy(unittest.IsolatedAsyncioTestCase):
 
     async def test_unpaired_short_circuit_immediate_response(self):
         """Test Path B: Upstream service immediately returns 403 Forbidden without calling HTTP proxy."""
+
         async def mock_short_circuit_handler(request: web.Request):
             return web.Response(
                 text="Access Denied by Policy",
@@ -360,10 +341,7 @@ class TestPairedProxy(unittest.IsolatedAsyncioTestCase):
             first_resp = responses[0]
             self.assertTrue(first_resp.HasField("streamed_immediate_response"))
             sir_hdrs = first_resp.streamed_immediate_response.headers_response.headers.headers
-            hdrs_dict = {
-                h.key: (h.raw_value.decode("utf-8") if h.raw_value else h.value)
-                for h in sir_hdrs
-            }
+            hdrs_dict = {h.key: (h.raw_value.decode("utf-8") if h.raw_value else h.value) for h in sir_hdrs}
             self.assertEqual(hdrs_dict.get(":status"), "403")
             self.assertEqual(hdrs_dict.get("x-blocked-by"), "Guardrail")
 

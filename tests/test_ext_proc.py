@@ -53,9 +53,7 @@ class TestExtProcServer(unittest.IsolatedAsyncioTestCase):
         for runner in reversed(self.http_runners):
             await runner.cleanup()
 
-    async def _start_mock_http_server(
-        self, handler, ssl_context: ssl.SSLContext | None = None
-    ) -> int:
+    async def _start_mock_http_server(self, handler, ssl_context: ssl.SSLContext | None = None) -> int:
         """Start a mock HTTP/HTTPS backend server and return its port."""
         app = web.Application()
         app.router.add_route("*", "/{path_info:.*}", handler)
@@ -77,6 +75,7 @@ class TestExtProcServer(unittest.IsolatedAsyncioTestCase):
     ) -> int:
         """Start the ext_proc gRPC server with TLS and return its port."""
         import socket
+
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(("127.0.0.1", 0))
             grpc_port = s.getsockname()[1]
@@ -237,8 +236,7 @@ class TestExtProcServer(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(resp_headers.HasField("streamed_immediate_response"))
             sir_hdrs = resp_headers.streamed_immediate_response.headers_response
             headers_dict = {
-                h.key: (h.raw_value.decode("utf-8") if h.raw_value else h.value)
-                for h in sir_hdrs.headers.headers
+                h.key: (h.raw_value.decode("utf-8") if h.raw_value else h.value) for h in sir_hdrs.headers.headers
             }
             self.assertEqual(headers_dict.get(":status"), "200")
 
@@ -341,6 +339,7 @@ class TestExtProcServer(unittest.IsolatedAsyncioTestCase):
 
     async def test_ext_proc_backend_timeout(self):
         """Test backend timeout returns 504 Gateway Timeout over TLS."""
+
         async def slow_handler(request: web.Request):
             await asyncio.sleep(2.0)
             return web.Response(text="slow response")
@@ -377,6 +376,7 @@ class TestExtProcServer(unittest.IsolatedAsyncioTestCase):
 
     async def test_ext_proc_observability_mode(self):
         """Test that observability mode produces no responses over TLS."""
+
         async def mock_handler(request: web.Request):
             return web.Response(text="ok")
 
@@ -407,6 +407,7 @@ class TestExtProcServer(unittest.IsolatedAsyncioTestCase):
 
     async def test_ext_proc_insecure_connection_rejected(self):
         """Test that unencrypted plaintext connections to the TLS gRPC server fail."""
+
         async def mock_handler(request: web.Request):
             return web.Response(text="ok")
 
@@ -464,10 +465,7 @@ class TestExtProcServer(unittest.IsolatedAsyncioTestCase):
                 responses.append(resp)
 
             sir_headers = responses[0].streamed_immediate_response.headers_response.headers.headers
-            headers_dict = {
-                h.key: (h.raw_value.decode("utf-8") if h.raw_value else h.value)
-                for h in sir_headers
-            }
+            headers_dict = {h.key: (h.raw_value.decode("utf-8") if h.raw_value else h.value) for h in sir_headers}
             self.assertEqual(headers_dict.get("content-encoding"), "gzip")
 
             received_body = b"".join(
@@ -484,20 +482,14 @@ class TestExtProcServer(unittest.IsolatedAsyncioTestCase):
 
         backend_cert, backend_key = generate_self_signed_cert(hostname="localhost")
         try:
-            backend_server_ssl = create_server_ssl_context(
-                cert_file=backend_cert, key_file=backend_key
-            )
+            backend_server_ssl = create_server_ssl_context(cert_file=backend_cert, key_file=backend_key)
             # Create client SSL context for proxy to verify backend cert
-            proxy_to_backend_ssl = ssl.create_default_context(
-                ssl.Purpose.SERVER_AUTH, cafile=backend_cert
-            )
+            proxy_to_backend_ssl = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=backend_cert)
 
             async def mock_handler(request: web.Request):
                 return web.Response(text="secure backend response", status=200)
 
-            https_port = await self._start_mock_http_server(
-                mock_handler, ssl_context=backend_server_ssl
-            )
+            https_port = await self._start_mock_http_server(mock_handler, ssl_context=backend_server_ssl)
             grpc_port = await self._start_ext_proc_server(
                 target_port=https_port,
                 target_scheme="https",

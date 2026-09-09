@@ -49,8 +49,10 @@ class TestMain(unittest.IsolatedAsyncioTestCase):
             self.assertIsInstance(server_credentials, grpc.ServerCredentials)
             self.assertIn("session_registry", kwargs)
 
-        with patch("ext_proc_proxy.run_proxy", side_effect=mock_run_proxy), \
-             patch("ext_proc_proxy.run_grpc_server", side_effect=mock_run_grpc_server):
+        with (
+            patch("ext_proc_proxy.run_proxy", side_effect=mock_run_proxy),
+            patch("ext_proc_proxy.run_grpc_server", side_effect=mock_run_grpc_server),
+        ):
             await run_servers(config)
 
         self.assertTrue(proxy_called)
@@ -58,11 +60,14 @@ class TestMain(unittest.IsolatedAsyncioTestCase):
 
     def test_main_cli_invocation(self):
         """Test main() parses args and invokes run_servers."""
+
         def fake_run(coro):
             coro.close()
 
-        with patch("sys.argv", ["ext_proc_proxy", "--self-signed"]), \
-             patch("ext_proc_proxy.asyncio.run", side_effect=fake_run) as mock_run:
+        with (
+            patch("sys.argv", ["ext_proc_proxy", "--self-signed"]),
+            patch("ext_proc_proxy.asyncio.run", side_effect=fake_run) as mock_run,
+        ):
             main()
             self.assertTrue(mock_run.called)
 

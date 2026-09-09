@@ -1,7 +1,7 @@
 import os
 
-from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 from grpc_tools import protoc
+from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 
 PROTO_ROOTS = [
     "proto/envoy/annotations/deprecation.proto",
@@ -26,7 +26,7 @@ PROTO_ROOTS = [
 
 
 class CustomBuildHook(BuildHookInterface):
-    def initialize(self, version, build_data):
+    def initialize(self, version: str, build_data: dict[str, object]) -> None:
         # Run protoc code generation before building the wheel
         try:
             os.mkdir("src/ext_proc_proxy/protogen")

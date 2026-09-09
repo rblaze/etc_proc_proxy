@@ -4,17 +4,16 @@ import os
 import ssl
 import subprocess
 import tempfile
-from typing import Optional, Tuple
 
 import grpc
 
 
 def generate_self_signed_cert(
-    cert_path: Optional[str] = None,
-    key_path: Optional[str] = None,
+    cert_path: str | None = None,
+    key_path: str | None = None,
     hostname: str = "localhost",
     days: int = 365,
-) -> Tuple[str, str]:
+) -> tuple[str, str]:
     """Generate a self-signed certificate and private key using openssl CLI.
 
     If cert_path and key_path are not provided, files will be created in a
@@ -67,28 +66,23 @@ def generate_self_signed_cert(
         subprocess.run(
             cmd,
             check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
         )
     except subprocess.CalledProcessError as err:
-        raise RuntimeError(
-            f"Failed to generate self-signed certificate: {err.stderr}"
-        ) from err
+        raise RuntimeError(f"Failed to generate self-signed certificate: {err.stderr}") from err
     except FileNotFoundError as err:
-        raise RuntimeError(
-            "OpenSSL executable ('openssl') was not found in PATH."
-        ) from err
+        raise RuntimeError("OpenSSL executable ('openssl') was not found in PATH.") from err
 
     return cert_path, key_path
 
 
 def get_or_create_server_cert_and_key(
-    cert_file: Optional[str] = None,
-    key_file: Optional[str] = None,
+    cert_file: str | None = None,
+    key_file: str | None = None,
     generate_self_signed: bool = False,
     hostname: str = "localhost",
-) -> Tuple[str, str]:
+) -> tuple[str, str]:
     """Resolve or generate certificate and private key file paths.
 
     Args:
@@ -101,13 +95,9 @@ def get_or_create_server_cert_and_key(
         Tuple of (cert_file, key_file).
     """
     if generate_self_signed:
-        return generate_self_signed_cert(
-            cert_path=cert_file, key_path=key_file, hostname=hostname
-        )
+        return generate_self_signed_cert(cert_path=cert_file, key_path=key_file, hostname=hostname)
     elif not cert_file or not key_file:
-        raise ValueError(
-            "Either provide both cert_file and key_file, or set generate_self_signed=True"
-        )
+        raise ValueError("Either provide both cert_file and key_file, or set generate_self_signed=True")
 
     if not os.path.exists(cert_file):
         raise FileNotFoundError(f"Certificate file not found: {cert_file}")
