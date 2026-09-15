@@ -1,0 +1,19 @@
+services:
+  litellm:
+    image: litellm-patched:v1
+    environment:
+      - LITELLM_DISABLE_NO_REDIS_WARNING=True
+      - LITELLM_MASTER_KEY=sk-1234
+      - OUTBOUND_HTTP_PROXY=https://grpc_proxy:11111
+      - DISABLE_OUTBOUND_PROXY_TLS_VERIFICATION=True
+    env_file: !override
+      - /dev/null
+    volumes:
+      - ./litellm_config.yaml:/app/config.yaml
+    command:
+      - "--config=/app/config.yaml"
+
+volumes:
+  postgres_data:
+    # Reuse existing litellm database
+    external: true

@@ -110,6 +110,7 @@ static_resources:
           validation_context:
             trust_chain_verification: ACCEPT_UNTRUSTED
   - name: ext_proc_cluster
+    type: STRICT_DNS
     load_assignment:
       cluster_name: ext_proc_cluster
       endpoints:
@@ -118,7 +119,7 @@ static_resources:
             address:
               socket_address:
                 # address: docker.internal
-                address: 10.142.0.7
+                address: grpc_proxy
                 port_value: 11112
     transport_socket:
       name: envoy.transport_sockets.tls

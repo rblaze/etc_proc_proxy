@@ -1,11 +1,20 @@
+include:
+  # Point this to litellm repo
+  - ../../../litellm/docker-compose.yml
+
 services:
+  grpc_proxy:
+    image: ext_proc_proxy:v1
+    command: --self-signed --port 11111 --ext-proc-port 11112 --ext-proc-target http://litellm:4000
+    depends_on:
+      - litellm
   envoy:
     image: envoyproxy/envoy:v1.39.1
     ports:
       - "10000:10000"
       - "9901:9901"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     command: --config-path /etc/envoy/envoy.yaml --file-flush-interval-msec 0 --file-flush-min-size-kb 0 # --component-log-level router:debug,dns:debug
     volumes:
       - ./envoy.yaml:/etc/envoy/envoy.yaml
+    depends_on:
+      - grpc_proxy

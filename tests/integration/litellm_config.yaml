@@ -1,0 +1,8 @@
+litellm_settings:
+  require_auth_for_metrics_endpoint: false
+
+general_settings:
+  forward_client_headers_to_llm_api: true
+
+router_settings:
+  num_retries: 0
