@@ -12,4 +12,4 @@ wheels/
 /.vscode/
 /GEMINI.md
 /ruff*.toml
-/src/ext_proc_proxy/protogen/
+/src/envoy_ext_proc_proxy/protogen/

@@ -9,12 +9,12 @@ from typing import Optional
 import aiohttp
 from aiohttp import web
 
-from ext_proc_proxy.cert_utils import (
+from envoy_ext_proc_proxy.cert_utils import (
     create_server_ssl_context,
     generate_self_signed_cert,
 )
-from ext_proc_proxy.config import ProxyConfig
-from ext_proc_proxy.proxy import create_proxy_app
+from envoy_ext_proc_proxy.config import ProxyConfig
+from envoy_ext_proc_proxy.proxy import create_proxy_app
 
 
 class TestProxyIntegration(unittest.IsolatedAsyncioTestCase):

@@ -11,15 +11,15 @@ if os.path.exists(GEN_DIR) and GEN_DIR not in sys.path:
 import asyncio
 import logging
 
-from ext_proc_proxy.cert_utils import (
+from envoy_ext_proc_proxy.cert_utils import (
     create_grpc_server_credentials,
     create_server_ssl_context,
     get_or_create_server_cert_and_key,
 )
-from ext_proc_proxy.config import ProxyConfig, parse_args
-from ext_proc_proxy.ext_proc_server import run_grpc_server
-from ext_proc_proxy.proxy import run_proxy
-from ext_proc_proxy.session_registry import SessionRegistry
+from envoy_ext_proc_proxy.config import ProxyConfig, parse_args
+from envoy_ext_proc_proxy.ext_proc_server import run_grpc_server
+from envoy_ext_proc_proxy.proxy import run_proxy
+from envoy_ext_proc_proxy.session_registry import SessionRegistry
 
 logger = logging.getLogger("ext_proc_proxy.main")
 

@@ -2,7 +2,7 @@
 
 import unittest
 
-from ext_proc_proxy.config import ProxyConfig, parse_args
+from envoy_ext_proc_proxy.config import ProxyConfig, parse_args
 
 
 class TestConfig(unittest.TestCase):

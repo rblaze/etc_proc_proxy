@@ -8,8 +8,8 @@ import aiohttp
 from aiohttp.client_reqrep import ConnectionKey
 import multidict
 
-from ext_proc_proxy.config import ProxyConfig
-from ext_proc_proxy.http_utils import (
+from envoy_ext_proc_proxy.config import ProxyConfig
+from envoy_ext_proc_proxy.http_utils import (
     EXCLUDED_REQUEST_HEADERS,
     HOP_BY_HOP_HEADERS,
     classify_upstream_error,
@@ -133,6 +133,23 @@ class TestHttpUtils(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("X-Hop1", filtered)
         self.assertNotIn("X-Hop2", filtered)
         self.assertNotIn("Proxy-Authenticate", filtered)
+
+    def test_filter_headers_multiple_connection_headers(self):
+        """Test that tokens from multiple Connection headers are all stripped."""
+        md = multidict.CIMultiDict(
+            [
+                ("Connection", "X-Hop1"),
+                ("Connection", "X-Hop2, close"),
+                ("X-Hop1", "strip-1"),
+                ("X-Hop2", "strip-2"),
+                ("X-Kept", "keep-this"),
+            ]
+        )
+        filtered = filter_response_headers(md)
+        self.assertEqual(filtered.get("X-Kept"), "keep-this")
+        self.assertNotIn("Connection", filtered)
+        self.assertNotIn("X-Hop1", filtered)
+        self.assertNotIn("X-Hop2", filtered)
 
     def test_is_bodyless_response(self):
         """Test is_bodyless_response predicate for HEAD, 204, 304."""

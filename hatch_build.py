@@ -29,7 +29,7 @@ class CustomBuildHook(BuildHookInterface):
     def initialize(self, version: str, build_data: dict[str, object]) -> None:
         # Run protoc code generation before building the wheel
         try:
-            os.mkdir("src/ext_proc_proxy/protogen")
+            os.mkdir("src/envoy_ext_proc_proxy/protogen")
         except FileExistsError:
             pass
 
@@ -39,8 +39,8 @@ class CustomBuildHook(BuildHookInterface):
                 "grpc_tools.protoc",
                 "-I=proto",
                 f"-I={proto_include}",
-                "--python_out=src/ext_proc_proxy/protogen",
-                "--grpc_python_out=src/ext_proc_proxy/protogen",
+                "--python_out=src/envoy_ext_proc_proxy/protogen",
+                "--grpc_python_out=src/envoy_ext_proc_proxy/protogen",
             ]
             + PROTO_ROOTS
         )

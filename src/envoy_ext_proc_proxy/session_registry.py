@@ -3,8 +3,11 @@
 import asyncio
 import logging
 from dataclasses import dataclass, field
+from typing import TypeVar
 
 logger = logging.getLogger("ext_proc_proxy.session")
+
+T = TypeVar("T")
 
 
 @dataclass(frozen=True)
@@ -54,23 +57,89 @@ RequestToEnvoyItem = UpstreamRequestHeaders | UpstreamRequestBodyChunk | Session
 ResponseFromEnvoyItem = EnvoyResponseHeaders | EnvoyResponseBodyChunk | SessionAbort
 
 
+DEFAULT_QUEUE_MAXSIZE: int = 32
+
+
 @dataclass
 class ExtProcSession:
     """State and queues for an active paired ext_proc session."""
 
     request_id: str
-    request_to_envoy_queue: asyncio.Queue[RequestToEnvoyItem] = field(default_factory=asyncio.Queue)
-    response_from_envoy_queue: asyncio.Queue[ResponseFromEnvoyItem] = field(default_factory=asyncio.Queue)
+    request_to_envoy_queue: asyncio.Queue[RequestToEnvoyItem] = field(
+        default_factory=lambda: asyncio.Queue(maxsize=DEFAULT_QUEUE_MAXSIZE)
+    )
+    response_from_envoy_queue: asyncio.Queue[ResponseFromEnvoyItem] = field(
+        default_factory=lambda: asyncio.Queue(maxsize=DEFAULT_QUEUE_MAXSIZE)
+    )
     is_paired: bool = False
-    is_aborted: bool = False
+    abort_event: asyncio.Event = field(default_factory=asyncio.Event)
+
+    @property
+    def is_aborted(self) -> bool:
+        return self.abort_event.is_set()
+
+    @staticmethod
+    def _put_abort(
+        q: asyncio.Queue[RequestToEnvoyItem] | asyncio.Queue[ResponseFromEnvoyItem],
+        msg: SessionAbort,
+    ) -> None:
+        try:
+            q.put_nowait(msg)
+        except asyncio.QueueFull:
+            try:
+                q.get_nowait()
+            except (asyncio.QueueEmpty, ValueError):
+                pass
+            try:
+                q.put_nowait(msg)
+            except asyncio.QueueFull:
+                pass
 
     def abort(self, reason: str = "Session aborted") -> None:
         """Abort session and signal both queues."""
-        if not self.is_aborted:
-            self.is_aborted = True
+        if not self.abort_event.is_set():
+            self.abort_event.set()
             abort_msg = SessionAbort(reason=reason)
-            self.request_to_envoy_queue.put_nowait(abort_msg)
-            self.response_from_envoy_queue.put_nowait(abort_msg)
+            self._put_abort(self.request_to_envoy_queue, abort_msg)
+            self._put_abort(self.response_from_envoy_queue, abort_msg)
+
+    async def put_request(self, item: RequestToEnvoyItem) -> bool:
+        """Put item into request_to_envoy_queue or return False if aborted."""
+        return await self._put_with_abort(self.request_to_envoy_queue, item)
+
+    async def put_response(self, item: ResponseFromEnvoyItem) -> bool:
+        """Put item into response_from_envoy_queue or return False if aborted."""
+        return await self._put_with_abort(self.response_from_envoy_queue, item)
+
+    async def _put_with_abort(
+        self,
+        q: asyncio.Queue[T],
+        item: T,
+    ) -> bool:
+        if self.abort_event.is_set():
+            return False
+
+        try:
+            q.put_nowait(item)
+            return True
+        except asyncio.QueueFull:
+            pass
+
+        put_task = asyncio.create_task(q.put(item))
+        abort_task = asyncio.create_task(self.abort_event.wait())
+
+        try:
+            done, _ = await asyncio.wait(
+                [put_task, abort_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            return put_task in done
+        finally:
+            if not put_task.done():
+                put_task.cancel()
+            if not abort_task.done():
+                abort_task.cancel()
+            await asyncio.gather(put_task, abort_task, return_exceptions=True)
 
 
 class SessionRegistry:

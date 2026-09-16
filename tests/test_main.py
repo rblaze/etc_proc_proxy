@@ -7,9 +7,9 @@ from unittest.mock import patch
 
 import grpc
 
-from ext_proc_proxy import main, run_servers
-from ext_proc_proxy.cert_utils import generate_self_signed_cert
-from ext_proc_proxy.config import ProxyConfig
+from envoy_ext_proc_proxy import main, run_servers
+from envoy_ext_proc_proxy.cert_utils import generate_self_signed_cert
+from envoy_ext_proc_proxy.config import ProxyConfig
 
 
 class TestMain(unittest.IsolatedAsyncioTestCase):
@@ -50,8 +50,8 @@ class TestMain(unittest.IsolatedAsyncioTestCase):
             self.assertIn("session_registry", kwargs)
 
         with (
-            patch("ext_proc_proxy.run_proxy", side_effect=mock_run_proxy),
-            patch("ext_proc_proxy.run_grpc_server", side_effect=mock_run_grpc_server),
+            patch("envoy_ext_proc_proxy.run_proxy", side_effect=mock_run_proxy),
+            patch("envoy_ext_proc_proxy.run_grpc_server", side_effect=mock_run_grpc_server),
         ):
             await run_servers(config)
 
@@ -66,7 +66,7 @@ class TestMain(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch("sys.argv", ["ext_proc_proxy", "--self-signed"]),
-            patch("ext_proc_proxy.asyncio.run", side_effect=fake_run) as mock_run,
+            patch("envoy_ext_proc_proxy.asyncio.run", side_effect=fake_run) as mock_run,
         ):
             main()
             self.assertTrue(mock_run.called)

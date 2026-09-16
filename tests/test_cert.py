@@ -7,7 +7,7 @@ import unittest
 
 import grpc
 
-from ext_proc_proxy.cert_utils import (
+from envoy_ext_proc_proxy.cert_utils import (
     create_grpc_server_credentials,
     create_server_ssl_context,
     generate_self_signed_cert,

@@ -10,20 +10,31 @@ import aiohttp
 from aiohttp import web
 import grpc
 
+import envoy_ext_proc_proxy  # noqa: F401
+
+# isort: split
 from envoy.service.ext_proc.v3 import (
     external_processor_pb2,
     external_processor_pb2_grpc,
 )
-from ext_proc_proxy.cert_utils import (
+from envoy_ext_proc_proxy.cert_utils import (
     create_grpc_server_credentials,
     create_server_ssl_context,
     generate_self_signed_cert,
 )
-from ext_proc_proxy.config import ProxyConfig
-from ext_proc_proxy.ext_proc_server import create_ext_proc_server
-from ext_proc_proxy.http_utils import REQUEST_ID_HEADER
-from ext_proc_proxy.proxy import create_proxy_app
-from ext_proc_proxy.session_registry import SessionRegistry
+from envoy_ext_proc_proxy.config import ProxyConfig
+from envoy_ext_proc_proxy.ext_proc_server import (
+    ExternalProcessorService,
+    UpstreamHeaders,
+    create_ext_proc_server,
+)
+from envoy_ext_proc_proxy.http_utils import REQUEST_ID_HEADER
+from envoy_ext_proc_proxy.proxy import create_proxy_app
+from envoy_ext_proc_proxy.session_registry import (
+    ExtProcSession,
+    SessionRegistry,
+    UpstreamRequestHeaders,
+)
 
 
 class TestPairedProxy(unittest.IsolatedAsyncioTestCase):
@@ -781,6 +792,258 @@ class TestPairedProxy(unittest.IsolatedAsyncioTestCase):
             # Receive body
             final_resp_body = await call.read()
             self.assertTrue(final_resp_body.HasField("response_body"))
+
+    async def test_paired_proxy_preserves_repeated_response_headers_such_as_set_cookie(self):
+        """Test that repeated headers such as Set-Cookie from Envoy are preserved for paired proxy clients."""
+        proxy_port = await self._start_proxy_server()
+
+        upstream_received_cookies = []
+        upstream_received_custom = []
+        upstream_received_request_custom = []
+
+        async def mock_upstream_handler(request: web.Request):
+            nonlocal upstream_received_cookies, upstream_received_custom, upstream_received_request_custom
+            upstream_received_request_custom = request.headers.getall("X-Repeated-Request-Header", [])
+            req_id = request.headers.get(REQUEST_ID_HEADER)
+
+            connector = aiohttp.TCPConnector(ssl=self.client_ssl_ctx)
+            async with aiohttp.ClientSession(connector=connector) as client:
+                proxy_url = f"https://127.0.0.1:{proxy_port}/api/cookies"
+                headers = {REQUEST_ID_HEADER: req_id}
+                async with client.get(proxy_url, headers=headers) as proxy_resp:
+                    upstream_received_cookies = proxy_resp.headers.getall("Set-Cookie", [])
+                    upstream_received_custom = proxy_resp.headers.getall("X-Custom-Multi", [])
+                    await proxy_resp.read()
+
+            return web.Response(text="ok", status=200)
+
+        upstream_port = await self._start_http_server(mock_upstream_handler)
+        grpc_port = await self._start_ext_proc_server(upstream_port)
+
+        creds = self._get_client_credentials()
+        async with grpc.aio.secure_channel(f"localhost:{grpc_port}", creds) as channel:
+            stub = external_processor_pb2_grpc.ExternalProcessorStub(channel)
+
+            input_queue: asyncio.Queue = asyncio.Queue()
+
+            async def request_generator():
+                while True:
+                    item = await input_queue.get()
+                    if item is None:
+                        break
+                    yield item
+
+            call = stub.Process(request_generator())
+
+            # 1. Envoy sends initial request with repeated request headers
+            req1 = external_processor_pb2.ProcessingRequest()
+            h1 = req1.request_headers.headers.headers.add()
+            h1.key = ":method"
+            h1.value = "GET"
+            h2 = req1.request_headers.headers.headers.add()
+            h2.key = ":path"
+            h2.value = "/api/cookies"
+            h3 = req1.request_headers.headers.headers.add()
+            h3.key = "x-repeated-request-header"
+            h3.value = "req-val-1"
+            h4 = req1.request_headers.headers.headers.add()
+            h4.key = "x-repeated-request-header"
+            h4.value = "req-val-2"
+            req1.request_headers.end_of_stream = True
+            await input_queue.put(req1)
+
+            # 2. Receive request_headers mutation
+            proxy_req_headers = await call.read()
+            self.assertTrue(proxy_req_headers.HasField("request_headers"))
+
+            # 3. Envoy sends response headers containing repeated Set-Cookie and custom headers
+            target_resp = external_processor_pb2.ProcessingRequest()
+            th1 = target_resp.response_headers.headers.headers.add()
+            th1.key = ":status"
+            th1.value = "200"
+            th2 = target_resp.response_headers.headers.headers.add()
+            th2.key = "Set-Cookie"
+            th2.value = "session=abc123; Path=/; HttpOnly"
+            th3 = target_resp.response_headers.headers.headers.add()
+            th3.key = "Set-Cookie"
+            th3.value = "theme=dark; Path=/; Secure"
+            th4 = target_resp.response_headers.headers.headers.add()
+            th4.key = "x-custom-multi"
+            th4.value = "custom-first"
+            th5 = target_resp.response_headers.headers.headers.add()
+            th5.key = "x-custom-multi"
+            th5.value = "custom-second"
+            target_resp.response_headers.end_of_stream = True
+            await input_queue.put(target_resp)
+            await input_queue.put(None)
+
+            # 4. Receive final response headers mutation
+            final_resp_hdrs = await call.read()
+            self.assertTrue(final_resp_hdrs.HasField("response_headers"))
+
+        self.assertEqual(
+            upstream_received_cookies,
+            ["session=abc123; Path=/; HttpOnly", "theme=dark; Path=/; Secure"],
+        )
+        self.assertEqual(upstream_received_custom, ["custom-first", "custom-second"])
+        self.assertEqual(upstream_received_request_custom, ["req-val-1", "req-val-2"])
+
+    async def test_dispatch_flow_simultaneous_completion_preserves_upstream_response(self):
+        """Test that when both queue reads complete together, upstream response is not dropped."""
+        config = ProxyConfig()
+        service = ExternalProcessorService(config=config, session_registry=self.session_registry)
+
+        ext_proc_session = ExtProcSession(request_id="test-simultaneous-req")
+        # Pre-fill both queues so both tasks in asyncio.wait complete simultaneously
+        await ext_proc_session.request_to_envoy_queue.put(
+            UpstreamRequestHeaders(
+                method="POST",
+                path="/paired-endpoint",
+                headers=[("x-test-hdr", "val")],
+                has_body=False,
+                scheme="https",
+            )
+        )
+
+        resp_queue: asyncio.Queue = asyncio.Queue()
+        await resp_queue.put(
+            UpstreamHeaders(
+                status=200,
+                headers=[("x-upstream-response-hdr", "custom-val")],
+                is_empty_body=True,
+            )
+        )
+
+        async def fake_envoy_stream():
+            target_resp = external_processor_pb2.ProcessingRequest()
+            th1 = target_resp.response_headers.headers.headers.add()
+            th1.key = ":status"
+            th1.value = "200"
+            target_resp.response_headers.end_of_stream = True
+            yield target_resp
+
+        responses = []
+        async with asyncio.timeout(3.0):
+            async for resp in service._dispatch_flow(
+                ext_proc_session=ext_proc_session,
+                resp_queue=resp_queue,
+                request_iterator=fake_envoy_stream(),
+                original_request_headers=[],
+            ):
+                responses.append(resp)
+
+        self.assertEqual(len(responses), 2)
+        # First response is request_headers mutation
+        self.assertTrue(responses[0].HasField("request_headers"))
+        # Second response is response_headers mutation containing UpstreamHeaders
+        self.assertTrue(responses[1].HasField("response_headers"))
+        mut_hdrs = {
+            h.header.key: (h.header.raw_value.decode("utf-8") if h.header.raw_value else h.header.value)
+            for h in responses[1].response_headers.response.header_mutation.set_headers
+        }
+        self.assertEqual(mut_hdrs.get(":status"), "200")
+        self.assertEqual(mut_hdrs.get("x-upstream-response-hdr"), "custom-val")
+
+    async def test_paired_proxy_large_body_does_not_hang_on_abort(self):
+        """Test that a paired proxy request with large body (> queue maxsize) unblocks and exits on abort."""
+        proxy_port = await self._start_proxy_server()
+        request_id = "test-paired-large-abort"
+        session = ExtProcSession(request_id=request_id)
+        self.session_registry.register(session)
+
+        async def generate_chunks():
+            for _ in range(50):
+                yield b"chunk-payload-data-" * 64
+                await asyncio.sleep(0.005)
+
+        connector = aiohttp.TCPConnector(ssl=self.client_ssl_ctx)
+
+        async def client_request():
+            async with aiohttp.ClientSession(connector=connector) as client:
+                url = f"https://127.0.0.1:{proxy_port}/large-body-test"
+                headers = {REQUEST_ID_HEADER: request_id}
+                async with client.post(url, headers=headers, data=generate_chunks()) as resp:
+                    text = await resp.text()
+                    return resp.status, text
+
+        req_task = asyncio.create_task(client_request())
+
+        for _ in range(50):
+            if session.request_to_envoy_queue.full():
+                break
+            await asyncio.sleep(0.01)
+        self.assertTrue(session.request_to_envoy_queue.full())
+
+        session.abort("Envoy stream reset")
+
+        status, body = await asyncio.wait_for(req_task, timeout=2.0)
+        self.assertEqual(status, 502)
+        self.assertIn("Envoy stream reset", body)
+
+    async def test_paired_flow_envoy_grpc_cancel_wakes_large_body_proxy_request(self):
+        """Test that Envoy cancelling the gRPC stream terminates a large body proxy request promptly."""
+        proxy_port = await self._start_proxy_server()
+        proxy_result = {}
+
+        async def mock_upstream_handler(request: web.Request):
+            req_id = request.headers.get(REQUEST_ID_HEADER)
+
+            async def generate_chunks():
+                for _ in range(50):
+                    yield b"streamed-chunk-data-" * 32
+                    await asyncio.sleep(0.005)
+
+            connector = aiohttp.TCPConnector(ssl=self.client_ssl_ctx)
+            async with aiohttp.ClientSession(connector=connector) as client:
+                proxy_url = f"https://127.0.0.1:{proxy_port}/paired-stream"
+                headers = {REQUEST_ID_HEADER: req_id}
+                try:
+                    async with client.post(proxy_url, headers=headers, data=generate_chunks()) as resp:
+                        proxy_result["status"] = resp.status
+                        proxy_result["text"] = await resp.text()
+                except Exception as err:
+                    proxy_result["error"] = str(err)
+
+            return web.Response(text="upstream ok", status=200)
+
+        upstream_port = await self._start_http_server(mock_upstream_handler)
+        grpc_port = await self._start_ext_proc_server(upstream_port)
+
+        creds = self._get_client_credentials()
+        async with grpc.aio.secure_channel(f"localhost:{grpc_port}", creds) as channel:
+            stub = external_processor_pb2_grpc.ExternalProcessorStub(channel)
+            input_queue: asyncio.Queue = asyncio.Queue()
+
+            async def request_generator():
+                while True:
+                    item = await input_queue.get()
+                    if item is None:
+                        break
+                    yield item
+
+            call = stub.Process(request_generator())
+
+            req1 = external_processor_pb2.ProcessingRequest()
+            h1 = req1.request_headers.headers.headers.add()
+            h1.key = ":method"
+            h1.value = "POST"
+            req1.request_headers.end_of_stream = True
+            await input_queue.put(req1)
+
+            proxy_req_headers = await call.read()
+            self.assertTrue(proxy_req_headers.HasField("request_headers"))
+
+            call.cancel()
+            await input_queue.put(None)
+
+        for _ in range(50):
+            if "status" in proxy_result or "error" in proxy_result:
+                break
+            await asyncio.sleep(0.05)
+
+        self.assertIn("status", proxy_result)
+        self.assertEqual(proxy_result["status"], 502)
+        self.assertIn("502 Bad Gateway", proxy_result["text"])
 
 
 if __name__ == "__main__":

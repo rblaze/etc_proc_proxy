@@ -9,8 +9,8 @@ import aiohttp
 import multidict
 from aiohttp import web
 
-from ext_proc_proxy.config import ProxyConfig
-from ext_proc_proxy.http_utils import (
+from envoy_ext_proc_proxy.config import ProxyConfig
+from envoy_ext_proc_proxy.http_utils import (
     REQUEST_ID_HEADER,
     classify_upstream_error,
     create_client_session,
@@ -18,11 +18,10 @@ from ext_proc_proxy.http_utils import (
     filter_response_headers,
     is_bodyless_response,
 )
-from ext_proc_proxy.session_registry import (
+from envoy_ext_proc_proxy.session_registry import (
     EnvoyResponseBodyChunk,
     EnvoyResponseHeaders,
     ExtProcSession,
-    RequestToEnvoyItem,
     SessionAbort,
     SessionRegistry,
     UpstreamRequestBodyChunk,
@@ -61,19 +60,26 @@ def _extract_scheme(
 
 async def _forward_request_body_to_envoy(
     request: web.Request,
-    queue: asyncio.Queue[RequestToEnvoyItem],
+    session: ExtProcSession,
 ) -> None:
-    content_iter = request.content.iter_any()
     try:
-        prev_chunk = await anext(content_iter)
-    except StopAsyncIteration:
-        await queue.put(UpstreamRequestBodyChunk(data=b"", is_last=True))
-        return
+        content_iter = request.content.iter_any()
+        try:
+            prev_chunk = await anext(content_iter)
+        except StopAsyncIteration:
+            await session.put_request(UpstreamRequestBodyChunk(data=b"", is_last=True))
+            return
 
-    async for next_chunk in content_iter:
-        await queue.put(UpstreamRequestBodyChunk(data=prev_chunk, is_last=False))
-        prev_chunk = next_chunk
-    await queue.put(UpstreamRequestBodyChunk(data=prev_chunk, is_last=True))
+        async for next_chunk in content_iter:
+            if not await session.put_request(UpstreamRequestBodyChunk(data=prev_chunk, is_last=False)):
+                return
+            prev_chunk = next_chunk
+        await session.put_request(UpstreamRequestBodyChunk(data=prev_chunk, is_last=True))
+    except asyncio.CancelledError:
+        raise
+    except Exception as err:
+        logger.warning("Error forwarding request body to Envoy for %s: %s", session.request_id, err)
+        session.abort(f"Request body forwarding error: {err}")
 
 
 async def _forward_envoy_body_to_client(
@@ -96,19 +102,20 @@ async def handle_paired_proxy_request(
     session: ExtProcSession,
 ) -> web.StreamResponse:
     """Handle request paired with an ext_proc session via X-Ai-Proxy-Request-Id."""
-    logger.info("gRPC proxy request: %s %s", request.method, request.url)
     session.is_paired = True
     target_scheme, err_response = _extract_scheme(request)
     if err_response is not None:
         return err_response
 
+    logger.info("gRPC proxy request: %s %s://%s%s", request.method, target_scheme, request.host, request.path)
+
     outgoing_headers = filter_request_headers(request.headers)
     req_headers_list = list(outgoing_headers.items())
     prepared = False
+    body_forward_task: asyncio.Task[None] | None = None
 
     try:
-        # 1. Feed request headers to the paired gRPC session queue
-        await session.request_to_envoy_queue.put(
+        if not await session.put_request(
             UpstreamRequestHeaders(
                 method=request.method,
                 path=str(request.rel_url),
@@ -116,23 +123,15 @@ async def handle_paired_proxy_request(
                 has_body=request.can_read_body,
                 scheme=target_scheme,
             )
-        )
+        ):
+            return web.Response(
+                status=502,
+                text="502 Bad Gateway: Session aborted",
+            )
 
-        # 2. Stream request body chunks if present
         if request.can_read_body:
-            await _forward_request_body_to_envoy(request, session.request_to_envoy_queue)
+            body_forward_task = asyncio.create_task(_forward_request_body_to_envoy(request, session))
 
-        # TODO: it seems that this code will not react to the SessionAbort
-        # from Envoy until the full request is read from the HTTP connection
-        # and enqueued for sending. It will not process any response messages
-        # either, for example if the final target server returns an error
-        # without waiting for the full request body.
-        # It's arguably okay for MVP, but may need to be addressed later. My
-        # concern is that requests can be quite big if they include a lot of
-        # context and keeping them in memory in case of SessionAbort will cause
-        # unnecessary waste until the full request is read.
-
-        # 3. Read response from Envoy via the paired session response queue
         first_item = await session.response_from_envoy_queue.get()
         if isinstance(first_item, SessionAbort):
             return web.Response(
@@ -153,7 +152,6 @@ async def handle_paired_proxy_request(
         await response.prepare(request)
         prepared = True
 
-        # 4. Stream response body chunks if not a body-less response
         if not first_item.is_empty_body:
             await _forward_envoy_body_to_client(session, response)
 
@@ -166,8 +164,14 @@ async def handle_paired_proxy_request(
             status_code, err_msg = classify_upstream_error(err)
             return web.Response(status=status_code, text=err_msg)
         raise
-    else:
-        return response
+    finally:
+        if body_forward_task is not None and not body_forward_task.done():
+            body_forward_task.cancel()
+            try:
+                await body_forward_task
+            except asyncio.CancelledError:
+                pass
+    return response
 
 
 async def handle_proxy_request(request: web.Request) -> web.StreamResponse:
@@ -184,23 +188,19 @@ async def handle_proxy_request(request: web.Request) -> web.StreamResponse:
             )
         return await handle_paired_proxy_request(request, session)
 
-    logger.info("Direct request: %s %s", request.method, request.url)
-    # Standard proxying behavior when no X-Ai-Proxy-Request-Id is present:
-    # 1. Determine target scheme from X-Forwarded-Proto
+    logger.info("Direct request: %s %s://%s%s", request.method, request.scheme, request.host, request.path)
+    # Standard proxying behavior when no X-Ai-Proxy-Request-Id is present.
     target_scheme, err_response = _extract_scheme(request)
     if err_response is not None:
         return err_response
 
-    # 2. Determine target host
     target_host = request.headers.get("Host") or request.host
     if not target_host:
         return web.Response(status=400, text="Missing Host header in request")
 
-    # 3. Construct target URL
     # request.rel_url preserves path, query parameters, and fragments
     target_url = f"{target_scheme}://{target_host}{request.rel_url}"
 
-    # 4. Prepare request headers and streaming body
     outgoing_headers = filter_request_headers(request.headers)
 
     body_data = None
@@ -209,7 +209,6 @@ async def handle_proxy_request(request: web.Request) -> web.StreamResponse:
 
     session: aiohttp.ClientSession = request.app[CLIENT_SESSION_KEY]
 
-    # 5. Forward request to target server
     try:
         upstream_cm = session.request(
             method=request.method,
@@ -227,7 +226,6 @@ async def handle_proxy_request(request: web.Request) -> web.StreamResponse:
             text=err_msg,
         )
 
-    # 6. Stream response back to original client connection
     try:
         resp_headers = filter_response_headers(upstream_resp.headers)
         response = web.StreamResponse(

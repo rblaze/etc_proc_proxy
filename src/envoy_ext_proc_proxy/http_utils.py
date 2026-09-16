@@ -8,7 +8,7 @@ import aiohttp
 import multidict
 from aiohttp import ClientTimeout
 
-from ext_proc_proxy.config import ProxyConfig
+from envoy_ext_proc_proxy.config import ProxyConfig
 
 # Standard Hop-by-Hop headers defined in RFC 2616 / RFC 7230 / RFC 9110
 HOP_BY_HOP_HEADERS: set[str] = {
@@ -36,19 +36,19 @@ EXCLUDED_REQUEST_HEADERS: set[str] = {
 
 def _get_connection_tokens(headers: Mapping[str, str]) -> set[str]:
     """Extract token names specified in the Connection header."""
-    connection_val = ""
+    tokens: set[str] = set()
     if isinstance(headers, (multidict.CIMultiDictProxy, multidict.CIMultiDict)):
-        connection_val = headers.get("connection", "")
+        connection_values = headers.getall("connection", [])
     else:
-        for k, v in headers.items():
-            if k.lower() == "connection":
-                connection_val = v
-                break
+        connection_values = [v for k, v in headers.items() if k.lower() == "connection"]
 
-    if not connection_val:
-        return set()
+    for val in connection_values:
+        for token in val.split(","):
+            token_clean = token.strip().lower()
+            if token_clean:
+                tokens.add(token_clean)
 
-    return {token.strip().lower() for token in connection_val.split(",") if token.strip()}
+    return tokens
 
 
 def filter_request_headers(

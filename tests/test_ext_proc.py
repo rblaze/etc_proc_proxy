@@ -6,23 +6,32 @@ import ssl
 import unittest
 from typing import List, Optional
 
-import aiohttp
 from aiohttp import web
 import grpc
 
+import envoy_ext_proc_proxy  # noqa: F401
+
+# isort: split
 from envoy.service.ext_proc.v3 import (
     external_processor_pb2,
     external_processor_pb2_grpc,
 )
-from ext_proc_proxy.cert_utils import (
+from envoy_ext_proc_proxy.cert_utils import (
     create_grpc_server_credentials,
     create_server_ssl_context,
     generate_self_signed_cert,
 )
-from ext_proc_proxy.config import ProxyConfig
-from ext_proc_proxy.ext_proc_server import (
+from envoy_ext_proc_proxy.config import ProxyConfig
+from envoy_ext_proc_proxy.ext_proc_server import (
     _build_header_mutation,
     create_ext_proc_server,
+)
+from envoy_ext_proc_proxy.session_registry import (
+    DEFAULT_QUEUE_MAXSIZE,
+    EnvoyResponseBodyChunk,
+    ExtProcSession,
+    SessionAbort,
+    UpstreamRequestBodyChunk,
 )
 
 
@@ -564,6 +573,98 @@ class TestExtProcServer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set_map.get(":scheme"), "https")
         self.assertEqual(set_map.get("x-keep"), "new-val")
         self.assertEqual(set_map.get("x-added"), "val")
+
+    async def test_queue_maxsize_and_backpressure(self):
+        """Test that queues enforce maxsize limits, apply backpressure, and abort cleanly when full."""
+        self.assertGreater(DEFAULT_QUEUE_MAXSIZE, 0)
+        session = ExtProcSession(request_id="test-maxsize")
+        self.assertEqual(session.request_to_envoy_queue.maxsize, DEFAULT_QUEUE_MAXSIZE)
+        self.assertEqual(session.response_from_envoy_queue.maxsize, DEFAULT_QUEUE_MAXSIZE)
+
+        # Fill queue to capacity
+        for i in range(DEFAULT_QUEUE_MAXSIZE):
+            session.request_to_envoy_queue.put_nowait(UpstreamRequestBodyChunk(data=b"chunk", is_last=False))
+        self.assertTrue(session.request_to_envoy_queue.full())
+
+        # An additional put should block due to backpressure
+        blocked_put = asyncio.create_task(
+            session.request_to_envoy_queue.put(UpstreamRequestBodyChunk(data=b"overflow", is_last=False))
+        )
+        await asyncio.sleep(0.01)
+        self.assertFalse(blocked_put.done())
+
+        # Reading one item relieves backpressure and unblocks the pending put
+        item = session.request_to_envoy_queue.get_nowait()
+        self.assertEqual(item.data, b"chunk")
+        await asyncio.wait_for(blocked_put, timeout=1.0)
+        self.assertTrue(session.request_to_envoy_queue.full())
+
+        # Aborting on a completely full queue must not raise QueueFull
+        session.abort(reason="test abort")
+        self.assertTrue(session.is_aborted)
+
+        # Confirm SessionAbort was enqueued
+        items = []
+        while not session.request_to_envoy_queue.empty():
+            items.append(session.request_to_envoy_queue.get_nowait())
+        self.assertTrue(any(isinstance(it, SessionAbort) for it in items))
+
+    async def test_put_request_and_response_wake_on_abort(self):
+        """Test that producers blocked on full queues wake up immediately when session is aborted."""
+        session = ExtProcSession(request_id="test-wake-abort")
+        for _ in range(DEFAULT_QUEUE_MAXSIZE):
+            session.request_to_envoy_queue.put_nowait(UpstreamRequestBodyChunk(data=b"data", is_last=False))
+            session.response_from_envoy_queue.put_nowait(EnvoyResponseBodyChunk(data=b"data", is_last=False))
+
+        self.assertTrue(session.request_to_envoy_queue.full())
+        self.assertTrue(session.response_from_envoy_queue.full())
+
+        req_put_task = asyncio.create_task(session.put_request(UpstreamRequestBodyChunk(data=b"more", is_last=False)))
+        resp_put_task = asyncio.create_task(session.put_response(EnvoyResponseBodyChunk(data=b"more", is_last=False)))
+        await asyncio.sleep(0.01)
+        self.assertFalse(req_put_task.done())
+        self.assertFalse(resp_put_task.done())
+
+        session.abort(reason="aborted by test")
+
+        req_res = await asyncio.wait_for(req_put_task, timeout=1.0)
+        resp_res = await asyncio.wait_for(resp_put_task, timeout=1.0)
+        self.assertFalse(req_res)
+        self.assertFalse(resp_res)
+
+        self.assertFalse(await session.put_request(UpstreamRequestBodyChunk(data=b"after", is_last=False)))
+        self.assertFalse(await session.put_response(EnvoyResponseBodyChunk(data=b"after", is_last=False)))
+
+    async def test_put_request_cancellation_cancels_child_task_without_orphan_write(self):
+        """Test that cancelling a put_request task cleanly cancels background put and prevents orphan write."""
+        session = ExtProcSession(request_id="test-cancel-clean")
+        for _ in range(DEFAULT_QUEUE_MAXSIZE):
+            session.request_to_envoy_queue.put_nowait(UpstreamRequestBodyChunk(data=b"fill", is_last=False))
+        self.assertTrue(session.request_to_envoy_queue.full())
+
+        put_caller_task = asyncio.create_task(
+            session.put_request(UpstreamRequestBodyChunk(data=b"orphan-payload", is_last=False))
+        )
+        await asyncio.sleep(0.01)
+        self.assertFalse(put_caller_task.done())
+
+        put_caller_task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await put_caller_task
+
+        item = session.request_to_envoy_queue.get_nowait()
+        self.assertEqual(item.data, b"fill")
+        self.assertFalse(session.request_to_envoy_queue.full())
+
+        await asyncio.sleep(0.02)
+
+        self.assertFalse(session.request_to_envoy_queue.full())
+        remaining = []
+        while not session.request_to_envoy_queue.empty():
+            remaining.append(session.request_to_envoy_queue.get_nowait())
+        self.assertFalse(
+            any(it.data == b"orphan-payload" for it in remaining if isinstance(it, UpstreamRequestBodyChunk))
+        )
 
 
 if __name__ == "__main__":
