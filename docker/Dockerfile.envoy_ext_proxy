@@ -1,0 +1,73 @@
+# syntax=docker/dockerfile:1.7
+
+# Base images
+ARG LITELLM_BUILD_IMAGE=cgr.dev/chainguard/wolfi-base@sha256:e624c5d5e42382ce7165ddafcbbf8e6769a24cbd02ea6114b880b05ae5ba2a8d
+ARG LITELLM_RUNTIME_IMAGE=cgr.dev/chainguard/wolfi-base@sha256:e624c5d5e42382ce7165ddafcbbf8e6769a24cbd02ea6114b880b05ae5ba2a8d
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.11.7@sha256:240fb85ab0f263ef12f492d8476aa3a2e4e1e333f7d67fbdd923d00a506a516a
+
+FROM $UV_IMAGE AS uvbin
+
+FROM $LITELLM_BUILD_IMAGE AS builder
+WORKDIR /app
+USER root
+
+COPY --from=uvbin /uv /usr/local/bin/uv
+COPY --from=uvbin /uvx /usr/local/bin/uvx
+
+RUN apk add --no-cache \
+        python-3.13 \
+        python-3.13-dev \
+        bash \
+        openssl
+
+ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=0 \
+    PATH="/app/.venv/bin:${PATH}" \
+    XDG_CACHE_HOME=/app/.cache
+
+# Copy dependency metadata first for layer caching
+COPY pyproject.toml uv.lock ./
+
+# Install third-party dependencies (cached unless pyproject.toml/uv.lock change)
+RUN --mount=type=cache,target=/app/.cache/uv,id=litellm-uv-cache \
+    uv sync --frozen --no-install-project --no-install-workspace --no-default-groups --no-editable \
+    --python python3.13
+
+# Copy source tree
+COPY . .
+
+RUN --mount=type=cache,target=/app/.cache/uv,id=litellm-uv-cache \
+    uv sync --frozen --no-default-groups --no-editable \
+        --python python3.13
+
+# Replace Windows line endings with Unix ones
+RUN sed -i 's/\r$//' docker/envoy_ext_proxy_entrypoint.sh && chmod +x docker/envoy_ext_proxy_entrypoint.sh
+
+FROM $LITELLM_RUNTIME_IMAGE AS runtime
+WORKDIR /app
+USER root
+
+RUN apk upgrade --no-cache && \
+    apk add --no-cache python-3.13 bash openssl tzdata
+
+# Copy only what runtime needs. The application is installed inside the venv;
+# the rest of the builder's /app is source and build metadata that must not
+# ship (manifest-scanning tools attribute everything in it to this image).
+COPY --from=builder /app/.venv /app/.venv
+COPY --from=builder /app/docker/envoy_ext_proxy_entrypoint.sh /app/docker/envoy_ext_proxy_entrypoint.sh
+
+ENV PATH="/app/.venv/bin:${PATH}" \
+    HOME=/app
+
+RUN mkdir -p /app/.cache && \
+    chown -R nobody:nogroup /app
+
+USER 65534
+
+EXPOSE 9901/tcp
+EXPOSE 11111/tcp
+EXPOSE 11112/tcp
+
+ENTRYPOINT ["/app/docker/envoy_ext_proxy_entrypoint.sh"]
+CMD ["--port", "11111", "--ext-proc-port", "11112", "--self-signed"]

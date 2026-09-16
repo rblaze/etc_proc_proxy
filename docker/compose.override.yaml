@@ -1,5 +1,6 @@
 services:
   litellm:
+    # Use litellm image with OUTBOUND_PROXY support
     image: litellm-patched:v1
     environment:
       - LITELLM_DISABLE_NO_REDIS_WARNING=True
@@ -9,9 +10,11 @@ services:
     env_file: !override
       - /dev/null
     volumes:
-      - ./litellm_config.yaml:/app/config.yaml
+      - ./configs/litellm_config.yaml:/app/config.yaml
     command:
       - "--config=/app/config.yaml"
+  db:
+    container_name: !reset
 
 volumes:
   postgres_data:
