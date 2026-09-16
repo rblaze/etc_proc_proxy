@@ -15,6 +15,9 @@ services:
       - "--config=/app/config.yaml"
   db:
     container_name: !reset
+  prometheus:
+    profiles:
+      - disabled
 
 volumes:
   postgres_data:
