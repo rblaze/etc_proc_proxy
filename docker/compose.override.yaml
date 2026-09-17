@@ -7,8 +7,8 @@ services:
       - LITELLM_MASTER_KEY=sk-1234
       - OUTBOUND_HTTP_PROXY=https://grpc_proxy:11111
       - DISABLE_OUTBOUND_PROXY_TLS_VERIFICATION=True
-      # - LITELLM_OTEL_V2=true
-      # - OTEL_ENDPOINT=http://echo:8080
+      - LITELLM_OTEL_V2=true
+      - OTEL_ENDPOINT=http://otel-collector:4318
     env_file: !override
       - /dev/null
     volumes:
